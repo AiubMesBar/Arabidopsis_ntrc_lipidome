@@ -9,7 +9,7 @@ The scripts used for the different analyses are organized into four main directo
 2. [RNA-seq results: Differential expression analysis](./Transcriptomics/Final_RNA_seq.Rmd)
 3. [RNA-seq results: Lipid metabolism-focused DEG analysis](./Transcriptomics/Lipid_related_transcriptomics.Rmd)
 4. [ANOVA evaluating genotype effects on fatty acid composition](./Fatty_acid_composition/anova.R)
-5. s
-6. f
-7. f
+5. [Lipidomics: Differential abundance analysis and Enrichment strategies](./Lipidomics/Final_Lipidomics.Rmd)
+6. [Lipidomics: Relative abundance analysis](./Lipidomics/Relative_abundance_Lipidomics.Rmd)
+7. [Conceptual Multi-Omics Integration](./Multiomics_Integration/Final_multiomics.Rmd)
    
