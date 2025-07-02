@@ -1,0 +1,471 @@
+---
+title: "Conceptual Multi-omics Integration"
+author: "Aiub Mohamed Barara"
+date: "2025-07-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+# Required packages
+library(clusterProfiler)
+library(org.At.tair.db)
+library(AnnotationDbi)
+library(DOSE)
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+
+library(stringdist)
+library(reshape2)
+
+library(tidyverse)
+library(tidytext)
+library(text2vec)
+
+library(RCy3)
+```
+
+
+# Data loading
+
+```{r}
+# We load previously saved differential gene expression results from the transcriptomic dataset
+DEGs <- read_xlsx("degs_adult_ntrc_vs_wt.xlsx")
+
+# We also load the list of significantly enriched BioCyc pathways obtained from the lipidomics analysis
+significant_pathways = read_xlsx("pathways_fgsea_anotados.xlsx")
+```
+
+
+# Gene Ontology (GO) Enrichment Analysis
+
+```{r}
+# We extract the list of differentially expressed genes (DEGs) using TAIR identifiers
+genes_tair <- unique(DEGs$GeneID)  
+
+# We define the background universe as all genes detected as expressed in the transcriptomic dataset
+# This includes all genes annotated with GO terms in the org.At.tair.db database
+
+atha.universe <- unique(AnnotationDbi::select(org.At.tair.db,columns = c("GO"),keys=keys(org.At.tair.db,keytype = "TAIR"))[["TAIR"]])
+
+atha.universe <- as.character(atha.universe) 
+length(atha.universe)
+```
+
+
+```{r}
+
+# We perform GO enrichment analysis using the enrichGO function from clusterProfiler
+# We test for Biological Process (BP) terms overrepresented in the list of DEGs
+ego <- enrichGO(gene = DEGs$GeneID,
+                OrgDb = org.At.tair.db,
+                universe = atha.universe,
+                keyType = "TAIR",
+                ont = "BP",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05)
+
+# We extract the list of GO term IDs from the enrichment results
+go_terms <- ego@result$ID
+```
+
+
+```{r}
+# We define a vector of lipid-related keywords to identify biologically relevant GO terms
+lipid_keywords <- c("lipid", "fatty", "glycerol", "phospholipid", "diacylglycerol", "triacylglycerol", "phospholipase", "phosphatidylcholine", "phosphatidylinositol","phosphatidylethanolamine","phosphatidylserine","phospholipases", "ceramide","vernolate","linolenate", "phosphatidate", "phosphatidic acid", "choline")
+
+# We filter enriched GO terms to retain only those whose descriptions match any of the lipid-related keywords
+lipid_related_terms <- ego@result %>%
+  dplyr::filter(grepl(paste(lipid_keywords, collapse = "|"), Description, ignore.case = TRUE))
+
+# We sort the filtered lipid-related terms by adjusted p-value to prioritize statistical significance
+lipid_related_terms <- lipid_related_terms %>% 
+  dplyr::arrange(p.adjust) 
+```
+
+
+```{r}
+# We generate a bar plot of enriched lipid-related GO terms using ggplot2
+# The y-axis represents -log10(adjusted p-value) to emphasize significance
+# Terms are ordered by adjusted p-value, and plotted using horizontal bars
+
+ggplot(lipid_related_terms, aes(x = reorder(Description, p.adjust), y = -log10(p.adjust))) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = expression(-log[10](adjusted~p~value)), 
+    title = "Términos GO relacionados con metabolismo lipídico") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 10))
+```
+
+
+```{r}
+# We export the list of all GO term descriptions from the enrichment output to a text file
+deg_terms <- ego@result$Description
+writeLines(deg_terms, "deg_terms.txt")
+
+# We export the subset of lipid-related GO terms to a CSV file
+go_lipid_terms <- lipid_related_terms$Description
+write.csv(lipid_related_terms, "GO_terms_lipid_related.csv", row.names = FALSE)
+```
+
+
+
+# GO–BioCyc Semantic Similarity Network (No Pre-Filtering)
+
+
+```{r}
+# We begin construction of a bipartite network connecting GO terms and BioCyc pathways
+# We use all enriched GO term descriptions, without prior filtering
+go_terms_all <- ego@result$Description
+
+# We extract the list of significant BioCyc pathways from lipidomics-based enrichment analysis
+biocyc_pathways <- significant_pathways$pathway
+
+# We compute pairwise string distances using the Jaro-Winkler method to quantify semantic similarity
+# This allows us to match terms across ontologies based on lexical similarity
+dist_matrix <- stringdistmatrix(a = go_terms_all, b = biocyc_pathways, method = "jw")
+
+# We convert distances to similarity scores by subtracting from 1
+sim_matrix <- 1 - dist_matrix
+
+# We reshape the similarity matrix into long format for easy manipulation and filtering
+sim_df <- melt(sim_matrix)
+colnames(sim_df) <- c("GO_Index", "BioCyc_Index", "Similarity")
+
+# We annotate each row with the corresponding GO term and BioCyc pathway names
+sim_df <- sim_df %>%
+  mutate(GO_Term = go_terms_all[GO_Index],BioCyc_Pathway = biocyc_pathways[BioCyc_Index])
+
+# We retain only those GO–BioCyc pairs with high similarity scores above a defined threshold (e.g., > 0.7)
+sim_df_filtered <- sim_df %>% filter(Similarity > 0.7)
+```
+
+## Bipartite Network Visualization 
+
+```{r}
+
+# We create an edge list for constructing an igraph object representing the bipartite network
+g <- graph_from_data_frame(sim_df_filtered[, c("GO_Term", "BioCyc_Pathway", "Similarity")], directed = FALSE)
+
+# We convert the igraph object to a tidygraph object and compute node-level attributes
+# Group: distinguishes between GO and BioCyc nodes
+# Degree: number of connections per node
+g_tbl <- as_tbl_graph(g) %>%
+  mutate(group = ifelse(name %in% go_terms_all, "GO", "BioCyc"),degree = centrality_degree())
+
+# We visualize the bipartite network using a force-directed layout (Fruchterman-Reingold)
+# Node color reflects group identity, node size reflects centrality, and edge width reflects similarity strength
+
+ggraph(g_tbl, layout = "fr") +
+  geom_edge_link(aes(width = Similarity), alpha = 0.4, color = "gray50") +
+  geom_node_point(aes(color = group, size = degree), alpha = 0.9) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3, family = "sans") +
+  scale_edge_width(range = c(0.2, 1.5)) +
+  scale_size(range = c(3, 7)) +
+  scale_color_manual(values = c("GO" = "#4682B4", "BioCyc" = "#F4A261")) +
+  theme_void() +
+  theme(legend.position = "none", plot.margin = margin(10, 10, 10, 10))
+```
+
+
+# GO–BioCyc Semantic Similarity Network (Pre-Filtering)
+
+```{r}
+# Biological tokenization
+
+# We create a corpus for tokenizing GO terms and BioCyc pathways
+go_df <- tibble(type = "GO", label = go_lipid_terms)
+bio_df <- tibble(type = "BioCyc", label = biocyc_pathways)
+
+# We merge both corpora and ensure unique term labels
+corpus <- bind_rows(go_df, bio_df) %>%
+  mutate(label = make.unique(as.character(label)))
+
+# We tokenize the labels into individual words and perform text cleaning
+tokenized <- corpus %>%
+  unnest_tokens(word, label, token = "words", drop = FALSE) %>%
+  filter(!word %in% stop_words$word) %>%
+  filter(str_detect(word, "[a-z]"))
+```
+
+
+```{r}
+# We build a document-term matrix (DTM) from the tokenized terms
+dtm <- tokenized %>%
+  dplyr::count(label, word) %>%
+  cast_dtm(document = label, term = word, value = n)
+
+# We compute cosine similarity between the terms using the DTM
+similarity <- sim2(as.matrix(dtm), method = "cosine", norm = "l2")
+
+# We extract label vectors separately for GO and BioCyc
+go_labels <- go_df$label
+bio_labels <- bio_df$label
+
+# We compute pairwise cosine similarity only between GO terms and BioCyc pathways
+sim_df <- as.data.frame(as.table(similarity[go_labels, bio_labels]))
+colnames(sim_df) <- c("GO_Term", "BioCyc_Pathway", "Similarity")
+
+# We filter relevant pairs using a threshold (adjustable)
+sim_df <- sim_df %>% filter(Similarity > 0.1)
+```
+
+
+## Bipartite Network Visualization: GO Terms ↔ BioCyc Pathways
+
+```{r}
+# We create an igraph object from the GO–BioCyc similarity table
+g <- graph_from_data_frame(sim_df[, c("GO_Term", "BioCyc_Pathway", "Similarity")], directed = FALSE)
+
+# We convert to tbl_graph and annotate nodes by group and degree centrality
+g_tbl <- as_tbl_graph(g) %>%
+  mutate(group = ifelse(name %in% go_lipid_terms, "GO", "BioCyc"),degree = centrality_degree())
+
+# We generate a bipartite graph layout
+ggraph(g_tbl, layout = "fr") +
+  geom_edge_link(aes(width = Similarity), alpha = 0.4, color = "gray50") +
+  geom_node_point(aes(color = group, size = degree), alpha = 0.9) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3, family = "sans") +
+  scale_edge_width(range = c(0.2, 1.5)) +
+  scale_size(range = c(3, 7)) +
+  scale_color_manual(values = c("GO" = "#4682B4", "BioCyc" = "#F4A261")) +
+  theme_void() +
+  theme(legend.position = "none",plot.margin = margin(10, 10, 10, 10))
+```
+
+
+## Tripartite Network: DEGs ↔ GO Terms ↔ BioCyc Pathways
+
+
+
+```{r}
+# We prepare gene2go: Gene (from) – GO Description (to) edges
+gene2go <- ego@result[, c("Description", "geneID")]
+gene2go <- data.frame(to = rep(gene2go$Description, 
+  lengths(strsplit(gene2go$geneID, "/"))),
+  from = unlist(strsplit(gene2go$geneID, "/")),
+  stringsAsFactors = FALSE
+) %>% distinct()
+
+# We filter gene2go to retain only lipid-related GO terms
+gene2go_filtered <- gene2go %>% filter(to %in% go_lipid_terms)
+
+# We prepare go2biocyc: GO Description (from) – BioCyc Pathway (to) edges with similarity weights
+# We add a 'type' column to distinguish edge types
+go2biocyc_filtered <- sim_df %>%
+  dplyr::rename(from = GO_Term, to = BioCyc_Pathway) %>%
+  dplyr::mutate(type = "go2biocyc") %>%
+  dplyr::distinct()
+
+# We annotate gene2go edges with their type
+gene2go_filtered <- gene2go_filtered %>% mutate(type = "gene2go")
+
+# We merge both edge types into a single data frame
+edges_all <- bind_rows(dplyr::select(gene2go_filtered, from, to, type),
+  dplyr::select(go2biocyc_filtered, from, to, type))
+```
+
+
+
+```{r}
+# We construct the network graph and assign node layers
+g <- graph_from_data_frame(edges_all, directed = FALSE)
+
+g_tbl <- as_tbl_graph(g) %>%
+  mutate(layer = case_when(
+    name %in% gene2go_filtered$from ~ "Gene",
+    name %in% gene2go_filtered$to ~ "GO",
+    name %in% go2biocyc_filtered$to ~ "BioCyc",
+    TRUE ~ "Other"))
+
+# We visualize the network with color-coded node layers and edge types
+ggraph(g_tbl, layout = "fr") +
+  geom_edge_link(aes(color = type), alpha = 0.6) +
+  geom_node_point(aes(color = layer), size = 4, alpha = 0.9) +
+  geom_node_text(aes(label = name), size = 3, repel = TRUE) +
+  scale_color_manual(values = c("Gene" = "#4CAF50", "GO" = "#2196F3", "BioCyc" = "#FF9880")) +
+  theme_void()
+```
+
+## Secondary Panel: BioCyc Pathways ↔ Lipids
+
+```{r}
+# We filter only those BioCyc pathways that are part of the DEG–GO–Pathway network
+filtered_significant_pathways <- significant_pathways %>%
+  filter(pathway %in% sim_df$BioCyc_Pathway)
+
+# We extract Pathway ↔ Lipid edges from the leadingEdge field
+edges_lipid <- filtered_significant_pathways %>%
+  dplyr::select(pathway, leadingEdge) %>%
+  filter(!is.na(leadingEdge)) %>%
+  mutate(leadingEdge = as.character(leadingEdge)) %>%
+  mutate(leadingEdge = strsplit(leadingEdge, ",")) %>%
+  unnest(leadingEdge) %>%
+  mutate(leadingEdge = str_trim(leadingEdge),
+  type = "pathway2lipid",
+  from = pathway,
+  to = leadingEdge) %>%
+  dplyr::select(from, to, type) %>%
+  distinct()
+```
+
+
+
+
+```{r}
+# We build the graph and annotate node types
+g_lipid <- graph_from_data_frame(edges_lipid, directed = FALSE)
+
+g_tbl_lipid <- as_tbl_graph(g_lipid) %>%
+  mutate(layer = case_when(
+    name %in% edges_lipid$from ~ "Pathway",
+    name %in% edges_lipid$to ~ "Lipid",
+    TRUE ~ "Other"))
+
+# We visualize the bipartite network
+ggraph(g_tbl_lipid, layout = "fr") +
+  geom_edge_link(color = "gray60", alpha = 0.6) +
+  geom_node_point(aes(color = layer), size = 4, alpha = 0.9) +
+  geom_node_text(aes(label = name), size = 3, repel = TRUE) +
+  scale_color_manual(values = c("Pathway" = "#FFA726", "Lipid" = "#8E24AA")) +
+  theme_void()
+```
+
+# Final Tripartite Conceptual Network: DEGs ↔ Function ↔ Lipids
+
+
+```{r}
+# 1) Edges from DEGs to unified function terms (GO or BioCyc)
+
+# We define GO and BioCyc functional terms
+func_go <- unique(gene2go_filtered$to)
+func_biocyc <- unique(go2biocyc_filtered$to)
+
+# We construct readable function labels combining GO and BioCyc
+go2biocyc_unified <- go2biocyc_filtered %>%
+  filter(from %in% gene2go_filtered$to & to %in% filtered_significant_pathways$pathway) %>%
+  mutate(func_id = paste0("Func_", row_number()),
+    label = paste0(from, " ⇄ ", to))
+
+# We generate mapping tables to associate GO and BioCyc terms with unified function IDs
+go_to_func <- go2biocyc_unified %>% dplyr::select(GO = from, func_id)
+biocyc_to_func <- go2biocyc_unified %>% dplyr::select(BioCyc = to, func_id)
+func_labels <- go2biocyc_unified %>% dplyr::select(func_id, label)
+
+# We map genes to function IDs using filtered GO terms
+edges_gene_func <- gene2go_filtered %>%
+  inner_join(go_to_func, by = c("to" = "GO")) %>%
+  transmute(from = from, to = func_id, type = "gene_func")
+```
+
+
+
+
+```{r}
+# 2) Edges from function nodes to differentially expressed lipids
+
+# We match BioCyc pathways to unified function IDs, then map to their associated lipids
+edges_func_lipid <- filtered_significant_pathways %>%
+  filter(pathway %in% biocyc_to_func$BioCyc) %>%
+  dplyr::select(pathway, leadingEdge) %>%
+  mutate(lipids = strsplit(leadingEdge, ",")) %>%
+  unnest(lipids) %>%
+  mutate(lipids = str_trim(lipids)) %>%
+  inner_join(biocyc_to_func, by = c("pathway" = "BioCyc")) %>%
+  transmute(from = func_id, to = lipids, type = "func_lipid")
+```
+
+
+```{r}
+# 3) We merge gene–function and function–lipid edges to form the final network
+edges_all <- bind_rows(edges_gene_func, edges_func_lipid)
+```
+
+
+
+
+```{r}
+# 4) We visualize the tripartite network and export the figure
+g <- graph_from_data_frame(edges_all, directed = FALSE)
+
+g_tbl <- as_tbl_graph(g) %>%
+  mutate(layer = case_when(
+  name %in% DEGs$GeneID ~ "Gene",
+  name %in% edges_func_lipid$to ~ "Lipid",
+  name %in% edges_gene_func$to ~ "Function",TRUE ~ "Other")) %>%
+  left_join(func_labels, by = c("name" = "func_id")) %>%  
+  mutate(label = name)
+
+ggraph(g_tbl, layout = "fr") +
+  geom_edge_link(aes(color = type), alpha = 0.5) +
+  geom_node_point(aes(color = layer), size = 4) +
+  geom_node_text(aes(label = label), repel = TRUE, size = 3) +
+  scale_color_manual(values = c(
+    "Gene" = "#4CAF50",
+    "Function" = "#2196F3",
+    "Lipid" = "#FF9800",
+    "Other" = "gray")) +
+  theme_void() +
+  theme(legend.position = "left",               
+    legend.title = element_text(size = 20), 
+    legend.text = element_text(size = 20))
+
+# We export the final graph to PNG
+ggsave("tripartite_network.png", width = 12, height = 10, dpi = 300, bg = "white")
+```
+
+```{r}
+# We prepare a table of functional mappings (Func_ID – GO – BioCyc)
+func_annot <- go2biocyc_unified %>%
+  dplyr::select(func_id, GO_Term = from, BioCyc_Pathway = to)
+
+# We export the table to an Excel file
+write_xlsx(func_annot, "func_annotation_table.xlsx")
+```
+
+
+
+```{r}
+# We create the network in Cytoscape for further exploration and styling
+
+### Note: Cytoscape must be launched prior to executing this step
+
+createNetworkFromIgraph(g, title = "Red DEG–Función–DEL", collection = "Integración Multiómica")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

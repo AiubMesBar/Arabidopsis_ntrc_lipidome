@@ -1,0 +1,577 @@
+---
+title: "Transcriptomic Analysis - Differential expression Analysis"
+author: "Aiub Mohamed Barara"
+date: "2025-07-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+knitr::opts_chunk$set(dev = "png", dpi = 600, fig.width = 6, fig.height = 4)
+```
+
+```{r}
+## Required packages
+library(edgeR) #also load limma as a dependency --> only used to calculate normalization factors
+library(ggplot2)
+library(ggrepel)
+library(gplots)
+library(dplyr)
+library(pheatmap)
+library(readr)
+library(writexl)
+library(viridis) 
+library(MetBrewer) 
+library(DESeq2) #just to calculate fpkms
+library(reshape2) 
+library(tidyr)
+```
+
+# Data Import and Preprocessing
+
+```{r}
+gene.count.matrix <- read.table(file = "gene_count_matrix.csv",header = T,sep = ",")
+
+rownames(gene.count.matrix) <- gene.count.matrix$gene_id
+rownames(gene.count.matrix) <- sub("\\|.*", "", rownames(gene.count.matrix))
+gene.count.matrix <- gene.count.matrix[,-1]
+
+head(gene.count.matrix)
+```
+
+```{r}
+## Library sizes
+barplot(colSums(gene.count.matrix)*1e-6, names = colnames(gene.count.matrix), 
+        ylab="Library size (millions)",las = 2, cex.names = 0.3)
+```
+
+```{r}
+## Sample information. Same sample order in coldata than in count matrix!
+condition <- c(rep("NTRC_adult",3), rep("NTRC_seed",3), rep("WT_adult", 3),rep("WT_seed", 3))
+type <- c(rep("paired-end",3), rep("single-end",3), rep("paired-end", 3),rep("single-end", 3))
+coldata <- data.frame(condition, type)
+rownames(coldata) <- colnames(gene.count.matrix)
+coldata
+```
+
+```{r}
+## Create DGEList object 
+d0 <- DGEList(gene.count.matrix)
+dim(d0) 
+
+## Calculate normalization factors. It doesn't normalize! 
+##Just calculates normalization factors for use downstream
+d0.norm <- calcNormFactors(d0) # tmm as default
+```
+
+```{r}
+## Filter low expressed genes. 
+cutoff <- 2
+drop <- which(apply(cpm(d0.norm), 1, max) < cutoff)
+d <- d0.norm[-drop,] 
+dim(d) #number of genes left
+```
+
+```{r}
+colnames(gene.count.matrix)
+group <- as.factor(condition) #Create a new variable “group” that combines genotype and time
+
+plotMDS(d, col = as.numeric(group)) #Multidimensional scaling (MDS) plot
+```
+
+```{r}
+###### Voom transformation and calculation of variance weights
+## Specify the model to be fitted. We do this before using voom since voom 
+# uses variances of the model residuals (observed - fitted)
+mm <- model.matrix(~0 + group)
+
+# When operating on a DGEList-object, voom converts raw counts 
+# to log-CPM values by automatically extracting library sizes 
+# and normalisation factors from x itself. 
+# Additional normalisation to log-CPM values can be specified 
+# within voom using the normalize.method argument.
+
+## ¿What is voom doing?
+# Counts are transformed to log2 counts per million reads (CPM),
+# where “per million reads” is defined based on the normalization 
+# factors we calculated earlier
+# A linear model is fitted to the log2 CPM for each gene, and the 
+# residuals are calculated. A smoothed curve is fitted to the 
+# sqrt(residual standard deviation) by average expression 
+# (see red line in the plot). The smoothed curve is used to 
+# obtain weights for each gene and sample that are passed 
+# into limma along with the log2 CPMs.
+
+
+# The read counts are processed by the voom function in limma to 
+# convert them into log2 counts per million (logCPM) with associated 
+# precision weights. If the data are very noisy, The logCPM values 
+# can be normalized between samples by the voom function or can be 
+# pre-normalized by adding normalization factors within edgeR (calcNormFactors).
+
+norm_expr <- voom(d, mm, plot = T) # Con filtrado. Aquí es donde calculamos los factores de normalización
+nofilter.voom <- voom(d0, mm, plot = T) # Sin filtrado #just to check!!
+
+n_gene_express <- norm_expr$E
+gene.ids <- rownames(n_gene_express)
+
+head(n_gene_express)
+write.csv(n_gene_express, file = "normalized.gene.expression.csv", row.names = TRUE)
+save(n_gene_express,file="normalized.gene.expression.RData")
+save(gene.ids,file="GeneID.RData")
+```
+
+```{r}
+## Library sizes
+barplot(colSums(norm_expr$E)*1e-6, names = colnames(d), 
+        ylab="Library size (millions)",las = 2, cex.names = 0.3)
+```
+
+```{r}
+# Density plot => It reveals differences in library size, inadequate normalization or Batch effects
+reshaped.norm_expr <- melt(norm_expr$E) #just reshaping data frame to input to ggplot
+p <- ggplot(aes(x=value, colour=Var2), data=reshaped.norm_expr)
+p + geom_density() + xlab("Log2-cpm") + ylab("Density")
+```
+
+```{r}
+# Boxplot after voom WITHOUT normalization
+boxplot(nofilter.voom$E, col=met.brewer(n=12, name="Hiroshige"), ylab="log2CPM voom",cex.lab=1.5, main= "No normalisation")
+```
+
+```{r}
+# Boxplot after voom WITH normalization (if any). Notice the difference
+boxplot(norm_expr$E, col=met.brewer(n=12, name="Hiroshige"),ylab="log2CPM voom",cex.lab=1.5, main= "Normalisation (+ filter)")
+```
+
+```{r}
+head(norm_expr$E)
+```
+
+# Descriptive Analysis
+
+```{r}
+# Scatter plots comparing the normalized expression values (log2-CPM) between all pairs of biological replicates from the NTRC and WT seedling groups. Each plot displays the expression values of one replicate against another, along with their Pearson correlation coefficient. This allows visual and quantitative assessment of reproducibility between replicates.
+
+par(mfrow = c(2, 3))
+pairs_seed <- list(c("NTRC_seed_1", "NTRC_seed_2"), c("NTRC_seed_1", "NTRC_seed_3"), c("NTRC_seed_2", "NTRC_seed_3"),c("WT_seed_1", "WT_seed_2"), c("WT_seed_1", "WT_seed_3"), c("WT_seed_2", "WT_seed_3"))
+
+for (p in pairs_seed) {
+  x <- p[1]
+  y <- p[2]
+  plot(x = norm_expr$E[,x],
+       y = norm_expr$E[,y],
+       pch=19,col="grey",xlab=x,ylab=y,cex=0.5)
+  text(x=4,y=12,
+       labels = paste(c("cor = ",round(100*cor(norm_expr$E[,x],
+                                               norm_expr$E[,y]),
+                                       digits = 2),"%"), collapse=""))
+}
+par(mfrow = c(1, 1))
+```
+
+```{r}
+# Scatter plots comparing the normalized expression values (log2-CPM) between all pairs of biological replicates from the NTRC and WT adult groups, with the aim of assessing reproducibility as previously described.
+
+par(mfrow = c(2, 3))
+pairs_adult <- list(c("NTRC_adult_1", "NTRC_adult_2"), c("NTRC_adult_1", "NTRC_adult_3"), c("NTRC_adult_2", "NTRC_adult_3"),c("WT_adult_1", "WT_adult_2"), c("WT_adult_1", "WT_adult_3"), c("WT_adult_2", "WT_adult_3"))
+
+for (p in pairs_adult) {
+  x <- p[1]
+  y <- p[2]
+  plot(x = norm_expr$E[,x],
+       y = norm_expr$E[,y],
+       pch=19,col="grey",xlab=x,ylab=y,cex=0.5)
+  text(x=4,y=12,
+       labels = paste(c("cor = ",round(100*cor(norm_expr$E[,x],
+                                               norm_expr$E[,y]),
+                                       digits = 2),"%"), collapse=""))
+}
+par(mfrow = c(1, 1))
+```
+
+## Principal Component Analysis
+
+```{r, message=FALSE}
+library(FactoMineR)
+library(factoextra)
+
+# We prepare a matrix of samples x genes for PCA input.
+pca.gene.expression <- data.frame(colnames(norm_expr$E),
+                                  t(norm_expr$E))
+
+colnames(pca.gene.expression)[1] <- "Sample"
+
+# We perform PCA on the prepared matrix.
+res.pca = PCA(pca.gene.expression, graph = FALSE, scale.unit = TRUE, quali.sup = 1) 
+
+# We generate a PCA plot with confidence ellipses by group.
+fviz_pca_ind(res.pca, col.ind = coldata$condition, pointsize = 2, pointshape = 21,
+             fill = "black", repel = TRUE, addEllipses = TRUE, ellipse.type = "confidence",
+             legend.title = "Conditions", title = '', show_legend = TRUE, show_guide = TRUE)
+```
+
+## Clustering strategies
+
+```{r, message = FALSE}
+res.hcpc <- HCPC(res.pca, graph = FALSE, nb.clust = 3)   
+```
+
+```{r, message = FALSE}
+fviz_dend(res.hcpc, k = 3, cex = 0.75, palette = "jco", rect = TRUE, rect_fill = TRUE, rect_border = "jco", labels_track_height = 5000)
+```
+
+# Differential expression analysis
+
+```{r}
+#  We calculate the average normalized expression (log2-CPM) for NTRC and WT replicates at the seedling stage and create a scatter plot to visualize their correlation, with the same aim as previously described.
+
+ntrc_seed <- rowMeans(norm_expr$E[, paste0("NTRC_seed_", 1:3)])
+wt_seed <- rowMeans(norm_expr$E[, paste0("WT_seed_", 1:3)])
+
+plot(x = wt_seed, y = ntrc_seed, pch = 19, col = "grey", xlab = "WT_seed", ylab = "NTRC_seed", cex = 0.5)
+text(x = 4, y = 12, labels = paste(c("cor = ",round(100*cor(wt_seed, ntrc_seed),digits = 2), "%"), collapse = ""))
+```
+
+```{r}
+#  We calculate the average normalized expression (log2-CPM) for NTRC and WT replicates at the adult stage and create a scatter plot to visualize their correlation. The correlation coefficient helps to quantify the difference in gene expression between both genotypes at this developmental stage.
+
+ntrc_adult <- rowMeans(norm_expr$E[, paste0("NTRC_adult_", 1:3)])
+wt_adult <- rowMeans(norm_expr$E[, paste0("WT_adult_", 1:3)])
+
+plot(x = wt_adult, y = ntrc_adult, pch = 19, col = "grey", xlab = "WT_adult", ylab = "NTRC_adult", cex = 0.5)
+text(x = 4, y = 12,labels = paste(c("cor = ",round(100*cor(wt_adult, ntrc_adult),digits = 2), "%"), collapse = ""))
+```
+
+```{r, message=FALSE}
+## We define a fit linear model according to experimental design:
+fit <- lmFit(norm_expr, mm)
+head(coef(fit)) 
+
+
+## We define contrasts for comparison:
+contrast.matrix <- makeContrasts(groupNTRC_seed - groupWT_seed, groupNTRC_adult - groupWT_adult, levels = colnames(coef(fit)))
+head(contrast.matrix)
+
+## Fit linear model to contrasts and compute statistics:
+contrast.linear.fit <- contrasts.fit(fit, contrast.matrix)
+contrast.results <- eBayes(contrast.linear.fit)
+```
+
+## Seedling Group Analysis 
+
+```{r, message=FALSE}
+# We extract results for seedling group contrast
+ntrc.wt_seed <- topTable(contrast.results, 
+                      number = nrow(contrast.results), 
+                      coef = 1, sort.by = "logFC")
+
+# We extract log2 fold-changes, adjusted p-values and gene IDs
+limma.log2fc_seed <- ntrc.wt_seed$logFC
+limma.adjusted.pval_seed <- ntrc.wt_seed$adj.P.Val 
+limma.genes.ids_seed <- rownames(ntrc.wt_seed)
+
+# We name vectors by gene IDs for easy access
+names(limma.log2fc_seed) <- limma.genes.ids_seed
+names(limma.adjusted.pval_seed) <- limma.genes.ids_seed
+
+# We identify significantly activated/repressed genes (fold-change + adjusted p-value cutoff)
+limma.activated.genes_seed <- limma.genes.ids_seed[limma.log2fc_seed > 1 & limma.adjusted.pval_seed < 0.05]
+limma.repressed.genes_seed <- limma.genes.ids_seed[limma.log2fc_seed < -1 & limma.adjusted.pval_seed < 0.05]
+```
+
+```{r}
+# We save the generated results
+write.table(limma.activated.genes_seed, file="activated_genes_seed.txt", sep="\n", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(limma.repressed.genes_seed, file="repressed_genes_seed.txt", sep="\n", quote = FALSE, col.names = FALSE, row.names = FALSE)
+```
+
+```{r, echo=FALSE}
+# We define the number of upregulated and downregulated genes in seedling group
+n_up_seed <- length(limma.activated.genes_seed)
+n_down_seed <- length(limma.repressed.genes_seed)
+
+# Volcano plot to visualize differential expression results
+log.limma.adjusted.pval_seed <- -log10(limma.adjusted.pval_seed)
+
+plot(limma.log2fc_seed, log.limma.adjusted.pval_seed, pch = 19, col = "grey", cex = 0.8, xlab = "log2(Fold-change)", ylab = "-log10(Adj p-val)", cex.lab = 1.5)
+
+# We highlight significantly upregulated genes in red
+points(x = limma.log2fc_seed[limma.activated.genes_seed],
+       y = log.limma.adjusted.pval_seed[limma.activated.genes_seed], col = "red", cex = 0.8, pch = 19)
+# We highlight significantly downregulated genes in blue
+points(x = limma.log2fc_seed[limma.repressed.genes_seed],
+       y = log.limma.adjusted.pval_seed[limma.repressed.genes_seed], col = "blue", cex = 0.8, pch = 19)
+
+legend("topright", legend = c(paste0("Upregulated (", n_up_seed, ")"),paste0("Downregulated (", n_down_seed, ")")),col = c("red", "blue"), pch = 19, cex = 1)
+```
+
+## Adult Group Analysis
+
+```{r}
+## We re-execute the previous pipeline with differentially expressed genes in adult grouo
+
+
+ntrc.wt_adult <- topTable(contrast.results, 
+                      number = nrow(contrast.results), 
+                      coef = 2, sort.by = "logFC")
+
+limma.log2fc_adult <- ntrc.wt_adult$logFC
+limma.adjusted.pval_adult <- ntrc.wt_adult$adj.P.Val 
+limma.genes.ids_adult <- rownames(ntrc.wt_adult)
+
+names(limma.log2fc_adult) <- limma.genes.ids_adult
+names(limma.adjusted.pval_adult) <- limma.genes.ids_adult
+
+limma.activated.genes_adult <- limma.genes.ids_adult[limma.log2fc_adult > 1 & limma.adjusted.pval_adult < 0.05]
+limma.repressed.genes_adult <- limma.genes.ids_adult[limma.log2fc_adult< -1 & limma.adjusted.pval_adult < 0.05]
+```
+
+```{r}
+write.table(limma.activated.genes_adult, file="activated_genes_adult.txt", sep="\n", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(limma.repressed.genes_adult, file="repressed_genes_adult.txt", sep="\n", quote = FALSE, col.names = FALSE, row.names = FALSE)
+```
+
+```{r, echo=FALSE}
+# We define the length of each gene set
+n_up <- length(limma.activated.genes_adult)
+n_down <- length(limma.repressed.genes_adult)
+
+log.limma.adjusted.pval_adult <- -log10(limma.adjusted.pval_adult)
+plot(limma.log2fc_adult, log.limma.adjusted.pval_adult, pch = 19, col = "grey", cex = 0.8, 
+     xlab = "log2(Fold-change)", ylab = "-log10(Adj p-val)", cex.lab = 1.5)
+
+points(x = limma.log2fc_adult[limma.activated.genes_adult],
+       y = log.limma.adjusted.pval_adult[limma.activated.genes_adult], col = "red", cex = 0.8, pch = 19)
+points(x = limma.log2fc_adult[limma.repressed.genes_adult],
+       y = log.limma.adjusted.pval_adult[limma.repressed.genes_adult], col = "blue", cex = 0.8, pch = 19)
+
+legend("topleft", legend = c(paste0("Upregulated (", n_up, ")"),paste0("Downregulated (", n_down, ")")),col = c("red", "blue"), pch = 19, cex = 1)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(VennDiagram)
+
+# We generate two Venn diagrams to compare differentially expressed genes between developmental stages (adult and seedling). This helps identify shared and stage-specific transcriptional responses.
+
+grid.newpage()
+draw.pairwise.venn(area1 = length(limma.activated.genes_adult),
+                   area2 = length(limma.activated.genes_seed),
+                   cross.area =  
+                     length(intersect(limma.activated.genes_adult,
+                                      limma.activated.genes_seed)),lwd = 3,
+                   category = c("Adult","Seedling"),
+                   euler.d = T,col = c("blue","red"),
+                   fill = c("blue","red"),alpha = 0.3,cex = 1.5,cat.cex = 1.5,cat.pos = c(-20, 20),cat.dist = c(0.03, 0.03))
+
+grid.newpage()
+draw.pairwise.venn(area1 = length(limma.repressed.genes_adult),
+                   area2 = length(limma.repressed.genes_seed),
+                   cross.area =  
+                     length(intersect(limma.repressed.genes_adult,
+                                      limma.repressed.genes_seed)),lwd = 3,
+                   category = c("Adult","Seedling"),
+                   euler.d = T,col = c("blue","red"),
+                   fill = c("blue","red"),alpha = 0.3,cex = 1.5,cat.cex = 1.5)
+```
+
+## Heatmap for total DEGS
+
+```{r}
+# We create a clustered heatmap to visualize the expression patterns of these DEGs across all samples, highlighting similarities and differences in gene regulation between conditions.
+
+degs <- c(limma.activated.genes_adult, limma.repressed.genes_adult, 
+          limma.activated.genes_seed, limma.repressed.genes_seed)
+
+length(degs)
+degs <- unique(degs)
+length(degs)
+
+degs.table <- norm_expr$E[degs,]
+head(degs.table)
+colnames(degs.table) <- colnames(norm_expr$E)
+
+# tiff("images/hh.tiff", height = 4, width = 6,
+#      units = 'in', res=300, compression="lzw")
+pheatmap(as.matrix(degs.table), cluster_rows = T, cluster_cols = T,
+         scale = "row", clustering_distance_rows = "correlation", 
+         clustering_method = "complete", #annotation_col = coldata, 
+         main="DEGs",fontsize_col=14, fontsize_row = 4, color = greenred(28))
+```
+
+```{r}
+upregulated_genes <- ntrc.wt_adult[limma.activated.genes_adult, ]
+downregulated_genes <- ntrc.wt_adult[limma.repressed.genes_adult, ]
+
+genes_adult <- rbind(
+  cbind(upregulated_genes, Regulation = "Upregulated"),
+  cbind(downregulated_genes, Regulation = "Downregulated")) %>%
+  dplyr::arrange(desc(logFC)) 
+
+de_genes_adult_export <- cbind(GeneID = rownames(de_genes_adult), de_genes_adult)
+
+write_xlsx(de_genes_adult_export, path = "degs_adult_ntrc_vs_wt.xlsx") 
+```
+
+## Heatmap for TOP 10 DEGS
+
+```{r}
+top10 <- head(de_genes_adult[order(-abs(de_genes_adult$logFC)), ], 10)
+top10_ids <- rownames(top10)
+
+selected.table <- norm_expr$E[top10_ids, ]
+head(selected.table)
+
+pheatmap(as.matrix(selected.table), cluster_rows = T, cluster_cols = T,
+         scale = "row", clustering_distance_rows = "correlation", 
+         clustering_method = "complete", #annotation_col = coldata, 
+         main="DEGs",fontsize_col=14, fontsize_row = 4, color = greenred(28))
+```
+
+# Gene Ontology (GO) Enrichment Analysis (Adult group)
+
+```{r message=FALSE, warning=FALSE}
+# Required packages
+library(clusterProfiler)
+library(org.At.tair.db)
+library(rrvgo)
+library(viridis)
+library(ggplot2)
+```
+
+```{r}
+## Auxiliary function to compute enrichments for GO table
+compute.enrichments <- function(gene.ratios, bg.ratios) {
+  gene.ratios.eval <- sapply(parse(text=gene.ratios),FUN = eval)
+  bg.ratios.eval <- sapply(parse(text=bg.ratios),FUN = eval)
+  enrichments <- round(x=gene.ratios.eval/bg.ratios.eval,digits = 2)
+  enrichments.text <- paste(enrichments, " (", gene.ratios, "; ", bg.ratios, ")",sep="")
+  
+  return(enrichments.text)  
+}
+
+atha.universe <- unique(AnnotationDbi::select(org.At.tair.db,columns = c("GO"),keys=keys(org.At.tair.db,keytype = "TAIR"))[["TAIR"]])
+length(atha.universe)
+```
+
+## Upregulated GO terms
+
+```{r}
+## We define the upregulated genes set 
+limma.activated.genes.wb_adult <- sub("\\|.*", "", limma.activated.genes_adult)
+
+limma.activated.enrich.go_adult <- enrichGO(gene = limma.activated.genes.wb_adult, universe = atha.universe, OrgDb = org.At.tair.db,ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05,qvalueCutoff  = 0.05, readable = FALSE, keyType = "TAIR")
+```
+
+```{r}
+## Plot examples
+goplot(limma.activated.enrich.go_adult,showCategory = 30)
+barplot(limma.activated.enrich.go_adult,drop=TRUE,showCategory = 10)
+cnetplot(limma.activated.enrich.go_adult)
+dotplot(limma.activated.enrich.go_adult, showCategory =20)
+```
+
+```{r}
+enrich.go.activated_result <- as.data.frame(limma.activated.enrich.go_adult)
+head(enrich.go.activated_result)
+```
+
+```{r}
+## GO term Description P-value Q-value Enrichment (SetRatio, BgRatio) Genes
+go.term.enrichments <- compute.enrichments(gene.ratios = enrich.go.activated_result$GeneRatio,
+                                           bg.ratios = enrich.go.activated_result$BgRatio)
+
+go.result.table_activated <- data.frame(enrich.go.activated_result$ID, enrich.go.activated_result$Description,
+                              enrich.go.activated_result$pvalue, enrich.go.activated_result$p.adjust,
+                              go.term.enrichments, 
+                              gsub(pattern = "/",replacement = " ",x = enrich.go.activated_result$geneID),
+                              stringsAsFactors = FALSE)
+
+colnames(go.result.table_activated) <- c("GO ID", "Description", "p-value", "adj p-value",
+                               "Enrichment (Target Ratio; BG Ration)","Genes")
+
+write_xlsx(go.result.table_activated, path = "go_terms_activated_adult.xlsx")
+```
+
+```{r, echo=FALSE}
+## Reducing the redundancy of GO using rrvgo package 
+# get the similarity matrix between terms
+simMatrix_act <- calculateSimMatrix(go.result.table_activated$`GO ID`,
+                                orgdb="org.At.tair.db",
+                                ont="BP",
+                                method="Rel")
+
+# group terms based on similarity
+scores_act <- setNames(-log10(go.result.table_activated$`q-value`), go.result.table_activated$`GO ID`)
+reducedTerms_act <- reduceSimMatrix(simMatrix_act,scores_act,threshold=0.7,orgdb="org.At.tair.db")
+
+
+# Plot GO terms as scattered points
+scatterPlot(simMatrix_act, reducedTerms_act)
+
+# Treemaps are space-filling visualization of hierarchical structures
+png("rrvgo.png", width = 8, height = 4, units = "in",res = 300)
+treemapPlot(reducedTerms_act)
+```
+
+## Downregulated GO terms
+
+```{r}
+## We define the downregulated genes set
+limma.repressed.genes.wb_adult <- sub("\\|.*", "", limma.repressed.genes_adult)
+
+limma.repressed.enrich.go_adult <- enrichGO(gene = limma.repressed.genes.wb_adult, universe      = atha.universe, OrgDb = org.At.tair.db,ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05,qvalueCutoff  = 0.05, readable = FALSE, keyType = "TAIR")
+```
+
+```{r}
+## Plot examples
+goplot(limma.repressed.enrich.go_adult,showCategory = 30)
+barplot(limma.repressed.enrich.go_adult,drop=TRUE,showCategory = 10)
+cnetplot(limma.repressed.enrich.go_adult)
+dotplot(limma.repressed.enrich.go_adult, showCategory =20)
+```
+
+```{r}
+enrich.go.repressed_result <- as.data.frame(limma.repressed.enrich.go_adult)
+head(enrich.go.repressed_result)
+```
+
+```{r}
+## GO term Description P-value Q-value Enrichment (SetRatio, BgRatio) Genes
+go.term.enrichments_rep <- compute.enrichments(gene.ratios = enrich.go.repressed_result$GeneRatio,
+                                           bg.ratios = enrich.go.repressed_result$BgRatio)
+
+go.result.table_repressed <- data.frame(enrich.go.repressed_result$ID, enrich.go.repressed_result$Description,
+                              enrich.go.repressed_result$pvalue, enrich.go.repressed_result$qvalue,
+                              go.term.enrichments_rep, 
+                              gsub(pattern = "/",replacement = " ",x = enrich.go.repressed_result$geneID),
+                              stringsAsFactors = FALSE)
+
+colnames(go.result.table_repressed) <- c("GO ID", "Description", "p-value", "q-value",
+                               "Enrichment (Target Ratio; BG Ration)","Genes")
+
+write.table(go.result.table_repressed, file = "go_terms_repressed_adult", sep = "\t", row.names = F,
+quote = F)
+```
+
+```{r, echo=FALSE}
+## Reducing the redundancy of GO using rrvgo package
+
+# get the similarity matrix between terms
+simMatrix_rep <- calculateSimMatrix(go.result.table_repressed$`GO ID`,
+                                orgdb="org.At.tair.db",
+                                ont="BP",
+                                method="Rel")
+
+# group terms based on similarity
+scores_rep <- setNames(-log10(go.result.table_repressed$`q-value`), go.result.table_repressed$`GO ID`)
+reducedTerms_rep <- reduceSimMatrix(simMatrix_rep,scores_rep,threshold=0.7,orgdb="org.At.tair.db")
+
+# Plot GO terms as scattered points
+scatterPlot(simMatrix_rep, reducedTerms_rep)
+
+# Treemaps are space-filling visualization of hierarchical structures
+png("rrvgo_rep.png", width = 8, height = 4, units = "in",res = 300)
+treemapPlot(reducedTerms_rep)
+```

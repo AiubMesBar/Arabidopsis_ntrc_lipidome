@@ -1,0 +1,285 @@
+---
+title: "Lipidomic Analysis - Relative abundance Analysis"
+author: "Aiub Mohamed Barara"
+date: "2025-07-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+knitr::opts_chunk$set(dev = "png", dpi = 600, fig.width = 6, fig.height = 4)
+```
+
+```{r setup, include=FALSE}
+# Required packages
+library(lipidr)
+library(ggplot2)
+library(pheatmap)
+library(corrplot)
+library(readxl)
+library(dplyr)
+library(FactoMineR)
+library(factoextra)
+library(tidyverse)
+library(fmsb)
+```
+
+# Data Import & Preprocessing
+
+## Data Wrapping into Lipidomics Experiment Object
+
+```{r}
+# We load the relative abundance lipidomics data 
+
+archivo_excel <- "Lipidomics_v2.xlsx"
+
+percent_total <- read_excel(archivo_excel, sheet = "%_total")
+```
+
+```{r}
+
+# We convert the imported data into a lipidomics experiment object
+# This facilitates standardized downstream analysis 
+d <- as_lipidomics_experiment(percent_total)
+names(assays(d)) <- "relative_abundance_percent" # We assign a name to the assay
+metadata(d)$units <- "relative_percent" # We specify the unit of measurement
+metadata(d)$description <- "Percentage values relative to total lipid abundance" # We annotate a descriptive metadata entry
+```
+
+## Sample Annotation
+
+```{r}
+# We load the sample annotation file and incorporate it into the experiment object
+
+annot <- read_excel("data_lipid_clin.xlsx")
+d <- add_sample_annotation(d, annot)
+
+# We convert sample group information into a factor for downstream grouping
+
+colData(d)$SampleType <- as.factor(colData(d)$SampleType)
+annotation_col <- data.frame(Group = colData(d)$SampleType) # We create a simplified annotation dataframe
+```
+
+```{r}
+# We view the full set of 22 column names in the rowData object
+colnames(rowData(d))
+```
+
+# Descriptive analysis
+
+## Quality Control
+
+```{r}
+# We assess whether relative abundances per sample approximately sum to 100%, which is expected given percentage normalization
+
+colSums(assay(d, "relative_abundance_percent"))
+```
+
+```{r}
+# We convert the matrix of lipid measurements into a data frame
+# and add lipid names as a column to enable reshaping
+df <- as.data.frame(assay(d, "relative_abundance_percent"))
+df$Lipid <- rownames(df)
+
+# We convert the data to long format to facilitate ggplot visualization
+df_long <- tidyr::gather(df, key = "Sample", value = "Relative_Abundance", -Lipid)
+
+# We extract the group information from sample names by removing trailing numbers
+df_long$Group <- gsub("-\\d+", "", df_long$Sample)
+df_long$Group <- factor(df_long$Group, levels = c("WT", "ntrc", "OE"))
+```
+
+```{r}
+# We generate a global boxplot across all lipid species to visualize overall distribution by group
+ggplot(df_long, aes(x = Group, y = Relative_Abundance, fill = Group)) + 
+  geom_boxplot(outlier.size = 0.5, alpha = 0.8) + 
+  scale_y_log10() +
+  labs(title = "Distribución de abundancia relativa de lípidos por condición",
+    x = "Condición",
+    y = "Abundancia relativa (%)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+```{r}
+# We plot lipid class distribution across all samples
+plot_lipidclass(d, type = "boxplot", measure = "relative_abundance_percent",  log = T) +
+  ggtitle("Distribución por clase lipídica (relative abundance)")
+```
+
+```{r}
+## Visualization: Per-Condition Boxplots
+# We define the experimental groups
+condiciones <- c("WT", "ntrc", "OE")
+
+# We generate a lipid class boxplot per condition
+for (cond in condiciones) {
+  # Filtrar muestras de la condición actual
+  d_filtrado <- d[, grepl(paste0("^", cond), colnames(d))]
+  
+  # Gráfico para la condición
+  p <- plot_lipidclass(d_filtrado, type = "boxplot", 
+    measure = "relative_abundance_percent",  
+    log = TRUE) +
+    ggtitle(paste("Lipid Classes on", cond, "relative_abundance_percent")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  print(p)
+}
+```
+
+## Principal Component Analysis
+
+```{r}
+# We perform principal component analysis to evaluate sample variation based on lipid profiles
+mva_res <- mva(d, measure = "relative_abundance_percent", method = "PCA")
+plot_mva(mva_res, color_by = "SampleType", components = c(1, 2)) +
+  ggtitle("PCA de perfiles moleculares (abundancias relativas)")
+```
+
+## Heatmap of Lipid Species
+
+```{r}
+# We transform the abundance matrix and apply log2 transformation for better visualization
+mat <- percent_total %>%
+  column_to_rownames("Compound Name") %>%
+  as.matrix()
+
+# We apply a +1 transformation to avoid log(0)
+mat_log <- log2(mat + 1)
+```
+
+```{r}
+# We visualize lipid abundance patterns using a clustered heatmap
+pheatmap(mat_log, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         scale = "row",           
+         clustering_distance_rows = "correlation",
+         clustering_method = "complete",
+         main = "Heatmap de abundancia relativa (log2 transformada)",
+         fontsize_col = 12,      
+         fontsize_row = 6)      
+```
+
+# Differential relative abundance analysis
+
+## Differential Analysis: ntrc vs WT
+
+```{r}
+# We perform differential analysis using limma, contrasting ntrc against WT
+
+de_results_ntrc_WT <- de_analysis(d,ntrc - WT,measure = "relative_abundance_percent")
+significant_molecules(de_results_ntrc_WT) # We retrieve significantly different molecules
+plot_results_volcano(de_results_ntrc_WT, show.labels = FALSE) # We generate a volcano plot
+```
+
+## Differential Analysis: OE vs WT
+
+```{r, fig.height=6}
+de_results_OE_WT <- de_analysis(d,OE - WT,measure = "relative_abundance_percent")
+significant_molecules(de_results_OE_WT)
+plot_results_volcano(de_results_OE_WT, show.labels = FALSE)
+```
+
+## Differential Analysis: ntrc vs OE
+
+```{r}
+de_results_ntrc_OE <- de_analysis(d,ntrc - OE,measure = "relative_abundance_percent")
+significant_molecules(de_results_ntrc_OE)
+plot_results_volcano(de_results_ntrc_OE, show.labels = FALSE)
+```
+
+# Lipid Class Analysis (relative abundance)
+
+```{r}
+# We load lipid class percentage values
+Percent_Class <- read_excel(archivo_excel, sheet = "%_Class")
+
+head(Percent_Class)
+```
+
+```{r}
+# We reshape the class-level data to long format for plotting
+# We annotate group membership based on sample naming conventions
+df_long <- Percent_Class %>%
+  pivot_longer(-Class, names_to = "Sample", values_to = "Relative_Abundance") %>%
+  mutate(Group = str_remove(Sample, "-\\d+")) %>%
+  mutate(Group = factor(Group, levels = c("WT", "ntrc", "OE")))
+```
+
+```{r}
+# We generate a boxplot distribution by lipid class 
+ggplot(df_long, aes(x = Group, y = Relative_Abundance, fill = Group)) +
+  geom_boxplot(alpha = 0.8, outlier.size = 0.5) +
+  facet_wrap(~ Class, scales = "free_y") +
+  labs(
+  title = "Distribution of Relative Abundance by Lipid Class",
+  x = "Genotype",
+  y = "Relative Abundance (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+```{r}
+# We reshape to wide format to calculate correlation between lipid classes
+df_wide <- Percent_Class %>%
+  pivot_longer(-Class, names_to = "Sample", values_to = "Value") %>%
+  pivot_wider(names_from = Class, values_from = Value)
+
+mat_class <- df_wide %>%
+  select(-Sample) %>%
+  as.matrix()
+
+# We compute Pearson correlation across lipid classes
+cor_mat <- cor(mat_class, method = "pearson")
+```
+
+```{r}
+# We visualize the correlation matrix using corrplot
+corrplot(cor_mat, method = "color", 
+         type = "upper", 
+         addCoef.col = "black", 
+         tl.col = "black", 
+         number.cex = 0.7, 
+         title = "Correlación entre clases lipídicas")
+```
+
+```{r}
+# We prepare data for radar chart analysis to visualize mean values by group
+df_long <- Percent_Class %>%
+  pivot_longer(-Class, names_to = "Sample", values_to = "Value") %>%
+  mutate(Group = gsub("-\\d+", "", Sample))
+
+# We compute group-level means across lipid classes
+df_means <- df_long %>%
+  group_by(Group, Class) %>%
+  summarise(MeanValue = mean(Value, na.rm = TRUE)) %>%
+  pivot_wider(names_from = Class, values_from = MeanValue)
+
+# We convert to matrix format required by fmsb
+radar_data <- as.data.frame(df_means[,-1])
+rownames(radar_data) <- df_means$Group
+
+# We add rows with max and min values for radar chart scaling
+max_vals <- apply(radar_data, 2, max)
+min_vals <- rep(0, ncol(radar_data))
+radar_data <- rbind(max_vals, min_vals, radar_data)
+```
+
+```{r}
+# We define color scheme for radar chart
+colors_border <- c("red", "blue", "green")
+colors_in <- scales::alpha(colors_border, 0.3)
+```
+
+```{r}
+# Finally, we draw the radar chart
+radarchart(radar_data, axistype=0,
+           pcol=colors_border, pfcol=colors_in, plwd=2, plty=1,
+           cglcol="grey", cglty=1, cglwd=0.8,vlcex=0.8)
+
+legend(x=1, y=1, legend=rownames(radar_data)[-c(1,2)], bty="n", pch=20 , col=colors_border, text.col = "black", cex=0.8, pt.cex=1.5)
+```

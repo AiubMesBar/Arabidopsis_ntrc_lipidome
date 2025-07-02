@@ -1,0 +1,340 @@
+---
+title: "Transcriptomic impact on Lipid Metabolism - A Comprehensive Analysis"
+author: "Aiub Mohamed Barara"
+date: "2025-07-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+knitr::opts_chunk$set(dev = "png", dpi = 600, fig.width = 6, fig.height = 4)
+```
+
+
+```{r}
+# Required packages
+library(VennDiagram)
+library(gridExtra) 
+library(pheatmap)
+library(gplots)
+library(readxl)
+library(openxlsx)
+library(flextable)
+library(dplyr)
+library(limma)
+library(ggplot2)
+```
+
+# Data Loading & Preprocessing
+
+```{r}
+sheets <- excel_sheets("Lipid metabolism gene-protein.xlsx")
+data_list <- lapply(sheets, function(sheet) read_excel("Lipid metabolism gene-protein.xlsx", sheet = sheet))
+names(data_list) <- sheets
+
+rutas_lipid <- list()
+for (i in 1:length(data_list)){
+  rutas_lipid[[i]] <- as.vector(data_list[[i]]$GENE)  
+  rutas_lipid[[i]] <- toupper(rutas_lipid[[i]])  
+}
+names(rutas_lipid) <- sheets # Lipid Pathway names
+str(rutas_lipid)
+```
+
+
+```{r}
+## The data generated earlier in the 'Final_RNAseq.Rmd' script is loaded here
+load("normalized.gene.expression.Rdata")
+load("GeneID.RData")
+
+length(gene.ids)
+```
+
+```{r}
+head(n_gene_express)
+```
+# Lipase-centered descriptive analysis
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# We initialize empty lists to store intersected genes
+intersect_lipase_list <- list()
+
+# We obtain intersecting genes between annotated genes and characterized lipases
+intersect_lipase <- intersect(gene.ids, rutas_lipid$Lipase)
+
+# We capture Venn diagram showing overlap
+venn_lipase <- grid.grabExpr(draw.pairwise.venn(
+    area1 = length(gene.ids),
+    area2 = length(rutas_lipid$Lipase),
+    cross.area = length(intersect_lipase),
+    lwd = 3, category = c("Annotated genes", "Characterized lipases"),
+    euler.d = TRUE, col = c("blue", "red"),
+    fill = c("blue", "red"), alpha = 0.3,
+    cex = 1.5, cat.cex = 1.0,cat.pos = c(-40, -5),cat.dist = c(0.03, 0.03), print.mode = "raw"))
+  
+# We store intersected genes in the list named by the pathway
+intersect_lipase_list[[names(rutas_lipid)["Lipase"]]] <- intersect_lipase
+
+
+# We display the Venn diagram
+grid.arrange(venn_lipase,nrow = 1)
+```
+
+
+```{r}
+# We extract unique lipase-encoding gene names from the intersection list
+lipase_names <- unique(unname(unlist(intersect_lipase_list)))
+# We retrieve expression data for lipase-encoding genes
+lipase_expr <- n_gene_express[lipase_names,]
+
+dim(lipase_expr)
+
+head(lipase_expr)
+# We rename columns to match original expression data
+colnames(lipase_expr) <- colnames(n_gene_express)
+
+# We generate a heatmap of lipase-encoding gene expression
+pheatmap(as.matrix(lipase_expr), cluster_rows = T, cluster_cols = T,
+         scale = "row", clustering_distance_rows = "correlation", 
+         clustering_method = "complete", #annotation_col = coldata, 
+         main="Lipase",fontsize_col=14, fontsize_row = 4, color = greenred(28))
+```
+
+
+# Lipid-centered differential expression analysis
+
+## Experimental Design and Linear Modeling
+
+
+```{r, message=FALSE}
+## Experimental design:
+experimental.design <- model.matrix(~ -1 + factor(c(1,1,1,2,2,2,3,3,3,4,4,4)))
+colnames(experimental.design) <- c("NTRC_adult", "NTRC_seed","WT_adult","WT_seed")
+
+## Fit linear model according to experimental design:
+linear.fit <- lmFit(n_gene_express, experimental.design)
+
+## We define contrasts for comparison:
+contrast.matrix <- makeContrasts(NTRC_seed-WT_seed, NTRC_adult-WT_adult, levels=colnames(coef(linear.fit)))
+
+## Fit linear model to contrasts and compute statistics:
+contrast.linear.fit <- contrasts.fit(linear.fit, contrast.matrix)
+contrast.results <- eBayes(contrast.linear.fit)
+```
+
+
+## Adult Group Analysis
+
+```{r}
+# We extract results for adult group contrast
+ntrc.wt_adult <- topTable(contrast.results, 
+                      number = nrow(n_gene_express), 
+                      coef = 2, sort.by = "logFC")
+
+# We extract log2 fold-changes, adjusted p-values and gene IDs
+limma.log2fc_adult <- ntrc.wt_adult$logFC
+limma.adjusted.pval_adult <- ntrc.wt_adult$adj.P.Val 
+limma.genes.ids_adult <- rownames(ntrc.wt_adult)
+
+# We name vectors by gene IDs for easy access
+names(limma.log2fc_adult) <- limma.genes.ids_adult
+names(limma.adjusted.pval_adult) <- limma.genes.ids_adult
+
+# We identify genes with strong activation or repression (fold-change cutoff 1)
+limma.activated.genes.fc_adult <- limma.genes.ids_adult[limma.log2fc_adult > 1]
+limma.repressed.genes.fc_adult <- limma.genes.ids_adult[limma.log2fc_adult < -1]
+
+# We identify significantly activated/repressed genes (fold-change + adjusted p-value cutoff)
+limma.activated.genes_adult <- limma.genes.ids_adult[limma.log2fc_adult > 1 & limma.adjusted.pval_adult < 0.05]
+limma.repressed.genes_adult <- limma.genes.ids_adult[limma.log2fc_adult < -1 & limma.adjusted.pval_adult < 0.05]
+```
+
+```{r, echo=FALSE}
+# Volcano plot to visualize differential expression results
+log.limma.adjusted.pval_adult <- -log10(limma.adjusted.pval_adult)
+plot(limma.log2fc_adult, log.limma.adjusted.pval_adult, pch = 19, col = "grey", cex = 0.8, 
+     xlab = "log2(Fold-change)", ylab = "-log10(Adj p-val)", cex.lab = 1.5)
+
+# We highlight significantly activated genes in red
+points(x = limma.log2fc_adult[limma.activated.genes_adult],
+       y = log.limma.adjusted.pval_adult[limma.activated.genes_adult], col = "red", cex = 0.8, pch = 19)
+
+# We highlight significantly repressed genes in blue
+points(x = limma.log2fc_adult[limma.repressed.genes_adult],
+       y = log.limma.adjusted.pval_adult[limma.repressed.genes_adult], col = "blue", cex = 0.8, pch = 19)
+```
+
+## Intersection Analysis with Lipid Pathways
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# We initialize empty lists to store intersected genes by pathway
+intersect_activated_limma_list <- list()
+intersect_repressed_limma_list <- list()
+
+# For each lipid pathway, we find intersections with activated and repressed genes
+for (j in 1:length(rutas_lipid)) {
+  intersect_activated_limma <- intersect(limma.activated.genes_adult, rutas_lipid[[j]])
+  intersect_repressed_limma <- intersect(limma.repressed.genes_adult, rutas_lipid[[j]])
+
+  # We capture Venn diagrams showing overlap
+  venn1_grob_limma <- grid.grabExpr(draw.pairwise.venn(
+    area1 = length(limma.activated.genes_adult),
+    area2 = length(rutas_lipid[[j]]),
+    cross.area = length(intersect_activated_limma),
+    lwd = 3, category = c("Activated", names(rutas_lipid)[j]),
+    euler.d = TRUE, col = c("blue", "red"),
+    fill = c("blue", "red"), alpha = 0.3,
+    cex = 1.5, cat.cex = 1.0, print.mode = "raw"))
+
+  venn2_grob_limma <- grid.grabExpr(draw.pairwise.venn(
+    area1 = length(limma.repressed.genes_adult),
+    area2 = length(rutas_lipid[[j]]),
+    cross.area = length(intersect_repressed_limma),
+    lwd = 3, category = c("Repressed", names(rutas_lipid)[j]),
+    euler.d = TRUE, col = c("blue", "red"),
+    fill = c("blue", "red"), alpha = 0.3,
+    cex = 1.5, cat.cex = 1.0, print.mode = "raw"))
+
+  # We store intersected genes in lists named by the pathway
+  intersect_activated_limma_list[[names(rutas_lipid)[j]]] <- intersect_activated_limma
+  intersect_repressed_limma_list[[names(rutas_lipid)[j]]] <- intersect_repressed_limma
+  
+  # We prepare text labels showing intersected genes
+  text_grob_activated_limma <- textGrob(
+    paste("Activated intersection:\n", paste(intersect_activated_limma, collapse = ", ")),
+    gp = gpar(fontsize = 10))
+
+  text_grob_repressed_limma <- textGrob(
+    paste("Repressed intersection:\n", paste(intersect_repressed_limma, collapse = ", ")),
+    gp = gpar(fontsize = 10))
+
+  # We display Venn diagrams and gene lists vertically
+  grid.arrange(venn1_grob_limma, text_grob_activated_limma, venn2_grob_limma, text_grob_repressed_limma, nrow = 4)
+}
+```
+
+
+# Summary Statistics and Visualization
+
+
+```{r}
+# We can print list of activated genes intersected with lipid pathways
+intersect_activated_limma_list
+
+# We count activated genes per lipid pathway
+count_activated_limma <- sapply(intersect_activated_limma_list, length)
+
+# We convert counts to data frame for plotting
+count_df_limma <- data.frame(Pathway = names(count_activated_limma), Genes_activated = count_activated_limma)
+
+# Barplot showing number of activated genes per lipid pathway
+ggplot(count_df_limma, aes(x = reorder(Pathway, -Genes_activated), y = Genes_activated, fill = Pathway)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Lipid Pathway", y = "Number of Activated Genes", title = "Number of Activated Genes per Lipid Pathway")
+```
+
+
+
+```{r}
+## We re-execute the previous workflow with repressed genes overlapping lipid metabolic pathways
+
+intersect_repressed_limma_list
+
+count_repressed_limma <- sapply(intersect_repressed_limma_list, length)
+
+count_df_limma <- data.frame(Pathway = names(count_repressed_limma), Genes_reprimidos = count_repressed_limma)
+
+ggplot(count_df_limma, aes(x = reorder(Pathway, -Genes_reprimidos), y = Genes_reprimidos, fill = Pathway)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "Lipid Pathway", y = "Number of Repressed Genes", title = "Number of Repressed Genes per Lipid Pathway")
+```
+
+
+# Retrieve and Inspect Genes
+
+
+```{r}
+# We get unique names of activated genes intersected with lipid pathways
+gene_activated_names <- unique(unname(unlist(intersect_activated_limma_list)))
+sort(limma.log2fc_adult[gene_activated_names])
+```
+
+
+```{r}
+# We extract data rows for activated genes from multiple datasets
+activated_rows <- list()  # List to store selected rows
+
+for (i in seq_along(gene_activated_names)) {
+  for (j in 1:8) {
+    if (gene_activated_names[i] %in% data_list[[j]]$GENE) {
+      indice <- which(data_list[[j]]$GENE == gene_activated_names[i])
+      activated_rows[[length(activated_rows) + 1]] <- data_list[[j]][indice, , drop = FALSE]
+    }
+  }
+}
+
+# We combine rows into a single data frame or tibble
+activated_excel <- bind_rows(activated_rows)
+
+# Ver el resultado final
+print(activated_excel)
+```
+
+
+```{r}
+## We re-execute the same pipeline with repressed genes overlapping lipid metabolic pathways
+
+gene_repressed_names <- unname(unlist(intersect_repressed_limma_list))
+sort(limma.log2fc_adult[gene_repressed_names])
+
+repressed_rows <- list()  # Lista para almacenar filas seleccionadas
+
+for (j in 1:8) {
+  for (i in seq_along(gene_repressed_names)) {
+    if (gene_repressed_names[i] %in% data_list[[j]]$GENE) {
+      indice <- which(data_list[[j]]$GENE == gene_repressed_names[i])
+      repressed_rows[[length(repressed_rows) + 1]] <- data_list[[j]][indice, , drop = FALSE]
+    }
+  }
+}
+
+repressed_excel <- bind_rows(repressed_rows)
+
+print(repressed_excel)
+```
+
+
+```{r}
+# We finally create a new Excel file of upregulated lipid-associated genes.
+wb <- createWorkbook()
+
+addWorksheet(wb, "Activated Genes")
+header_style <- createStyle(fontSize = 12, fontColour = "white", fgFill = "#4F81BD",
+  halign = "CENTER", textDecoration = "Bold", border = "Bottom")
+writeData(wb, "Activated Genes", activated_excel, headerStyle = header_style)
+addFilter(wb, "Activated Genes", row = 1, cols = 1:ncol(activated_excel))
+setColWidths(wb, "Activated Genes", cols = 1:ncol(activated_excel), widths = "auto")
+
+saveWorkbook(wb, "activated_genes.xlsx", overwrite = TRUE)
+```
+
+
+```{r}
+# We finally create a new Excel file of downregulated lipid-associated genes.
+wb_r <- createWorkbook()
+
+addWorksheet(wb_r, "Repressed Genes")
+writeData(wb_r, "Repressed Genes", repressed_excel, headerStyle = header_style)
+addFilter(wb_r, "Repressed Genes", row = 1, cols = 1:ncol(repressed_excel))
+setColWidths(wb_r, "Repressed Genes", cols = 1:ncol(repressed_excel), widths = "auto")
+
+saveWorkbook(wb_r, "repressed_genes.xlsx", overwrite = TRUE)
+```
+
+

@@ -1,0 +1,788 @@
+---
+title: "Lipidomic Analysis - Differential abundance Analysis"
+author: "Aiub Mohamed Barara"
+date: "2025-07-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+knitr::opts_chunk$set(dev = "png", dpi = 600, fig.width = 6, fig.height = 4)
+```
+
+```{r setup, include=FALSE}
+# Required packages
+library(lipidr)
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(RColorBrewer)
+library(pheatmap)
+library(FactoMineR)
+library(factoextra)
+library(tidyverse)
+
+library(limma)
+library(purrr)
+
+library(fgsea)
+library(stats)
+library(writexl)
+
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(tibble)
+```
+
+
+# Introduction: *lipidr* package
+
+The *lipidr* package provides a suite of specialized functions designed to streamline the inspection, analysis, and visualization of targeted lipidomics datasets. Compatible with Skyline CSV exports, *lipidr* supports the simultaneous processing of data from multiple analytical methods.
+
+## Data Handling & Integration
+
+*lipidr* converts Skyline files into SummarizedExperiment objects, ensuring seamless compatibility with the broader Bioconductor ecosystem. Users can effortlessly incorporate sample annotations—including experimental groups and clinical metadata—to enhance downstream analyses.
+
+## Quality Control & Normalization
+
+The package offers robust quality assessment tools, generating PCA score plots, box plots, and other diagnostic visualizations to evaluate sample integrity and lipid measurements. Flexible normalization options are available, supporting workflows both with and without internal standards.
+
+## Advanced Analytical Capabilities
+
+-   Differential Analysis: Test associations between lipid abundances and clinical variables, with results intuitively visualized via volcano plots.
+
+-   Lipid Set Enrichment Analysis (LSEA): A novel feature detecting preferential enrichment of specific lipid classes, chain lengths, or unsaturation patterns.
+
+-   Interactive Visualization: Custom plots for interpreting LSEA outcomes are natively integrated.
+
+# Data Import & Preprocessing
+
+```{r}
+# We load the raw lipidomics data 
+lipid.expression <- read_xlsx("Lipidomics_v1.xlsx")
+
+# We extract the lipid identifiers from the first column
+lipid.ids <- lipid.expression[[1]]
+
+# We remove the first column (lipid IDs) to keep only numeric values
+lipid.expression <- lipid.expression[-1]
+
+# We assign lipid IDs as row names for the expression matrix
+rownames(lipid.expression) <- lipid.ids
+
+# We preview the top rows of the data matrix
+head(lipid.expression)
+```
+
+```{r}
+# We calculate the total lipid content per sample (in nmol/mg DW) and plot it
+
+total_lipids <- colSums(lipid.expression)
+barplot(total_lipids, las = 2, main = "Total lipids per sample (nmol/mg DW)", 
+        col =  rep(c("lightblue", "salmon", "darkgreen"), each = 5))
+```
+
+```{r}
+# We visualize the distribution of lipid abundances per sample using boxplots
+
+boxplot(lipid.expression, outline = F, las = 2, ylab = "Lipid distribution per sample (nmol/mg DW)",
+        col = rep(c("lightblue", "salmon", "darkgreen"), each = 5))
+```
+
+```{r}
+# We add 1 to all values to avoid log(0), then apply log2 transformation
+lipid.expression.1 <- lipid.expression + 1
+log_data <- log2(lipid.expression.1)
+
+# We export the log-transformed matrix to a tab-delimited file for external use
+write.table(x = log_data,file = "a_thaliana_lipid_expression.tsv",
+            quote = F,row.names = F, sep = "\t")
+```
+
+```{r}
+# We plot the total lipid content per sample using log-transformed data
+
+log_total_lipids <- colSums(log_data)
+barplot(log_total_lipids, las = 2, main = "Total lipids per sample", ylab = "log2(nmol/mg DW +1)", 
+        col =  rep(c("lightblue", "salmon", "darkgreen"), each = 5))
+```
+
+```{r}
+# We visualize the distribution of log-transformed lipid abundances per sample
+
+boxplot(log_data, outline = F, las = 2, main = "Lipid distribution per sample", ylab= "log2(nmol/mg DW +1)",
+        col = rep(c("lightblue", "salmon", "darkgreen"), each = 5))
+```
+
+## Data Wrapping into Lipidomics Experiment Object
+
+```{r}
+# We wrap the log-transformed data into a lipidomicsExperiment object for downstream analysis
+
+d <- as_lipidomics_experiment(log_data)
+
+print(d)
+```
+
+```{r}
+# We set the appropriate assay name and units for concentration values
+names(assays(d)) <- "log2(nmol/mg DW + 1)"
+metadata(d)$units <- "log2(nmol/mg DW + 1)"
+
+# We verify the changes
+print(d)
+```
+
+## Sample Annotation
+
+Sample annotation can be prepared in Excel and saved as CSV. The table should have at least two columns, first indicating sample names and other columns indicating clinical variables.
+
+```{r}
+# We import sample annotation data from an Excel file and associate it with the experiment 
+d <- add_sample_annotation(d, read_excel(path="data_lipid_clin.xlsx", col_names = T))
+# We ensure that the SampleType is treated as a factor
+colData(d)$SampleType <- as.factor(colData(d)$SampleType)
+
+colData(d)
+```
+
+```{r}
+# We inspect feature-level metadata
+row_data <- rowData(d)
+head(row_data)
+```
+
+```{r}
+# We list all 22 column names in the row metadata
+colnames(rowData(d))
+```
+
+# Descriptive Analysis
+
+```{r}
+# We convert the expression matrix to long format and extract group information
+df <- as.data.frame(assay(d, "log2(nmol/mg DW + 1)"))
+df$Lipid <- rownames(df)
+df_long <- tidyr::gather(df, "Sample", "Concentration", -Lipid)
+df_long$Group <- gsub("-\\d+", "", df_long$Sample) # Extraemos WT, ntrc, OE
+
+# We plot lipid concentrations by group.
+ggplot(df_long, aes(x = Group, y = Concentration, fill = Group)) + 
+  geom_boxplot() + 
+  scale_y_log10() + 
+  labs(title = "Lipid concentration distribution by group", y = "log2(nmol/mg DW + 1)")
+```
+
+```{r}
+# We generate a boxplot grouped by lipid class
+plot_lipidclass(d, type = "boxplot", measure = "log2(nmol/mg DW + 1)",  log = F) +
+  ggtitle("Distribución por clase lipídica")
+```
+
+```{r}
+# We iterate through each condition and plot class-specific lipid distributions
+condiciones <- c("WT", "ntrc", "OE")
+
+for (cond in condiciones) {
+  d_filtrado <- d[, grepl(paste0("^", cond), colnames(d))]
+  
+  p <- plot_lipidclass(
+    d_filtrado, 
+    type = "boxplot", 
+    measure = "log2(nmol/mg DW + 1)",  
+    log = F) +
+    ggtitle(paste("Lipid Classes on", cond, "log2(nmol/mg DW + 1)")) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  print(p)
+}
+```
+
+## Principal Component Analysis
+
+We can investigate sample variation using either PCA or PCoA (classical MDS).
+
+```{r}
+# We prepare a matrix of samples x lipids for PCA input
+pca_lipid_data <- data.frame(Sample = colnames(d),  
+              t(assay(d, "log2(nmol/mg DW + 1)")) )
+```
+
+```{r, fig.width=6, fig.height=5}
+# We perform PCA on the prepared matrix
+res.pca <- PCA(pca_lipid_data, graph = FALSE, scale.unit = F,  quali.sup = 1)
+```
+
+```{r, fig.width=6, fig.height=5}
+# We generate a PCA plot with confidence ellipses by group
+fviz_pca_ind(
+  res.pca,
+  col.ind = gsub("-\\d+", "", pca_lipid_data$Sample),  # Color por grupo
+  pointsize = 3,
+  pointshape = 21,
+  fill = "black",
+  repel = TRUE,
+  addEllipses = TRUE,
+  ellipse.type = "confidence",
+  legend.title = "Group",
+  title = "PCA: Perfil lipídico (log2-transform.)",
+  palette = "jco"  ) +
+  theme_bw()
+```
+
+Plotting other components is possible by specifying `components` argument. For example `components = c(2,3)` plots second and third components.
+
+## Heatmap Visualization
+
+```{r}
+# We extract the expression matrix and define sample group annotations
+mat <- assay(d, "log2(nmol/mg DW + 1)")
+mat <- as.matrix(mat)
+
+annotation_col <- data.frame(Group = colData(d)$SampleType)
+rownames(annotation_col) <- colnames(mat)
+```
+
+```{r}
+# We define a diverging color palette for heatmap visualization
+my_colors <- colorRampPalette(rev(brewer.pal(9, "RdYlGn")))(100)
+```
+
+```{r}
+# We generate a heatmap of lipid profiles clustered by rows and columns
+pheatmap(mat,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         scale = "row",  # escalado por filas para ver patrones relativos
+         clustering_distance_rows = "correlation",
+         clustering_method = "complete",
+         annotation_col = annotation_col,
+         main = "Heatmap of Lipid Profiles",
+         fontsize_col = 12,
+         fontsize_row = 6,
+         color = my_colors)
+```
+
+# Differential abundance analysis
+
+This step of the workflow requires the `limma` package to be installed. Normalized and log transformed data should be used.
+
+```{r}
+## We define a custom function to perform pairwise differential abundance analysis across conditions
+## This function expects a SummarizedExperiment object (`data`) and a vector of conditions (e.g., "WT", "ntrc", "OE")
+
+run_pairwise_de <- function(data, conditions) {
+    # We construct the design matrix using the conditions without an intercept
+  design <- model.matrix(~ 0 + factor(conditions))
+  colnames(design) <- levels(factor(conditions))
+  
+  # We fit a linear model using the normalized and log-transformed assay data
+  fit <- lmFit(assay(data, "log2(nmol/mg DW + 1)"), design)
+  
+    # We define contrasts between all pairs of interest: ntrc vs WT, OE vs WT, and ntrc vs OE
+  contrasts <- makeContrasts(
+    ntrc_vs_WT = ntrc - WT,
+    OE_vs_WT = OE - WT,
+    ntrc_vs_OE = ntrc - OE,
+    levels = design)
+  
+    # We apply the contrast matrix and compute moderated statistics using empirical Bayes
+  fit2 <- contrasts.fit(fit, contrasts)
+  fit2 <- eBayes(fit2)
+  
+    # We extract the top differential lipids for each contrast and bind them into a single tibble
+  map_dfr(
+    colnames(contrasts),
+    ~ topTable(fit2, coef = .x, number = Inf, adjust.method = "fdr") %>%
+      as_tibble(rownames = "Lipid") %>%
+      mutate(Contrast = .x)
+  )
+}
+```
+
+```{r}
+# We execute the pairwise differential analysis using the sample type column as grouping variable
+de_results <- run_pairwise_de(d, conditions = colData(d)$SampleType)
+```
+
+```{r}
+# We extract the lipid annotation table from the row metadata of the object "d"
+lipid_annotation <- as_tibble(rowData(d)) %>% 
+  dplyr::select(Molecule, Class)
+
+# In the object "de_results", the lipid name column is called "Lipid"
+# If names match with the "Molecule" field in the annotation, we can directly join them
+de_results_annotated <- de_results %>%
+  left_join(lipid_annotation, by = c("Lipid" = "Molecule"))
+```
+
+```{r, fig.height=6}
+# We filter significant lipids based on adjusted p-value < 0.05 and absolute log2 fold-change > 1
+# Then, we arrange by contrast and p-value for reporting
+significant_lipids <- de_results_annotated %>%
+  filter(adj.P.Val < 0.05 & abs(logFC) > 1) %>%
+  arrange(Contrast, adj.P.Val)
+
+# We summarize the number of significant lipids per contrast
+table(significant_lipids$Contrast)
+```
+
+```{r}
+# We generate the complete table of annotated lipids, regardless of significance
+# This is saved as a CSV file for archival or downstream use
+
+all_lipids <- de_results_annotated %>% arrange(Lipid, adj.P.Val)
+write.csv(all_lipids,file = "lipidos_totales_anotados.csv",row.names = FALSE)
+```
+
+```{r}
+# We define a reusable function to generate volcano plots for a given contrast
+# Points are colored by lipid class and labeled as significant or not based on thresholds
+
+plot_volcano <- function(de_results, contrast) {
+  df <- de_results %>% 
+    filter(Contrast == contrast) %>%
+    mutate(Significance = case_when(abs(logFC) > 1 & adj.P.Val < 0.05 ~ "Significativo",TRUE ~ "No significativo"))
+  
+  ggplot(df, aes(x = logFC, y = -log10(adj.P.Val), color = Class)) + 
+    geom_point(alpha = 0.7, size = 2) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
+    labs(title = paste("Volcano Plot:", contrast),
+      x = "log2(Fold-change)",
+      y = "-log10(Adj p-val)",
+      color = "Clase Lipídica") +
+    theme_bw() +
+    theme(legend.position = "right")
+}
+```
+
+```{r}
+# We extract the list of unique contrasts present in the results
+# For each contrast, we generate and export a volcano plot as PNG
+
+contrasts <- unique(de_results_annotated$Contrast)
+
+walk(contrasts, ~ {
+  p <- plot_volcano(de_results_annotated, .x)
+  print(p)
+  ggsave(paste0("Volcano_", .x, ".png"), p, width = 8, height = 6)
+})
+```
+
+```{r}
+# We export the annotated significant lipid table as an Excel file for inspection or publication
+write_xlsx(significant_lipids,path = "lipidos_significativos_anotados.xlsx")
+```
+
+```{r}
+# We extract a unique list of significant lipid names
+# This list is saved as a plain TXT file for downstream enrichment or intersection analyses
+
+lipidos_unicos <- unique(significant_lipids$Lipid)
+
+writeLines(lipidos_unicos,con = "lista_lipidos_significativos.txt")
+```
+
+# Enrichment analysis
+
+## ORA and LSEA by property
+
+We prepare annotated tables per contrast...
+
+```{r}
+# We extract lipid-level annotations from the SummarizedExperiment object
+row_annotations <- as.data.frame(rowData(d)) %>%
+  rownames_to_column("Lipid")
+
+# We define a function to merge differential analysis results with lipid annotations
+prepare_lipid_table <- function(df, annotations) {
+  df %>%
+    distinct(Lipid, Contrast, .keep_all = TRUE) %>% # We ensure unique lipid-contrast combinations
+    left_join(annotations, by = "Lipid") # We join with lipid annotations using lipid names
+}
+
+# We generate complete and significant annotated tables for background and foreground sets
+background_all <- prepare_lipid_table(de_results_annotated, row_annotations)
+foreground_all <- prepare_lipid_table(significant_lipids, row_annotations)
+```
+
+We define ORA function by property and contrast:
+
+```{r}
+# We implement a function to perform ORA using Fisher’s exact test
+# It tests whether specific lipid properties are enriched among significantly regulated lipids
+
+run_ora_by_contrast <- function(background, foreground, property, min_size = 3) {
+  map_dfr(unique(background$Contrast), function(ct) {
+    bg_ct <- background %>% filter(Contrast == ct)
+    fg_ct <- foreground %>% filter(Contrast == ct)
+
+        # We create lipid sets grouped by the specified property (e.g., class, length, unsaturation)
+    sets <- split(bg_ct$Lipid, bg_ct[[property]])
+    sets <- sets[lengths(sets) >= min_size] # We retain only sets with a minimum number of lipids
+
+        # We apply Fisher's exact test for each set to test enrichment
+    ora_res <- map_dfr(names(sets), function(set_name) {
+      set_lipids <- sets[[set_name]]
+      a <- sum(fg_ct$Lipid %in% set_lipids)  # Lipids in both foreground and set
+      b <- sum(!(fg_ct$Lipid %in% set_lipids))  # Lipids in foreground but not in set
+      c <- sum(bg_ct$Lipid %in% set_lipids) - a  # Lipids in background and set only
+      d <- sum(!(bg_ct$Lipid %in% set_lipids)) - b  # Lipids only in background and not in set
+
+      mat <- matrix(c(a, b, c, d), nrow = 2)
+      pval <- fisher.test(mat, alternative = "greater")$p.value # One-sided test for enrichment
+
+      tibble(Contrast = ct, Set = set_name, p_value = pval, a = a)
+    })
+
+    ora_res %>% mutate(FDR = p.adjust(p_value, method = "fdr")) # 
+  })
+}
+```
+
+
+We proceed to execute ORA by property:
+
+```{r}
+# We run ORA for three lipid properties: class, degree of unsaturation, and chain length
+
+ora_class <- run_ora_by_contrast(background_all, foreground_all, "Class.x")
+ora_unsat <- run_ora_by_contrast(background_all, foreground_all, "total_cs")
+ora_length <- run_ora_by_contrast(background_all, foreground_all, "total_cl")
+```
+
+```{r}
+dir.create("ORA_results", showWarnings = FALSE)
+```
+
+```{r}
+# We export the ORA results as CSV files for each property
+write.csv(ora_class, "ORA_results/ORA_resultados_por_clase.csv", row.names = FALSE)
+write.csv(ora_unsat, "ORA_results/ORA_resultados_por_insaturacion.csv", row.names = FALSE)
+write.csv(ora_length, "ORA_results/ORA_resultados_por_longitud.csv", row.names = FALSE)
+```
+
+
+Let's visualize ORA results by property...
+
+```{r}
+# We define a function to plot ORA results with significant FDR values
+
+plot_ora <- function(ora_df, property_label) {
+  ora_df %>%
+    filter(FDR < 0.05) %>% # We retain only significant results after FDR correction
+    ggplot(aes(x = reorder(Set, -log10(FDR)), y = -log10(FDR), fill = Contrast, label = a)) +
+    geom_col(position = position_dodge(), width = 0.7) +
+    geom_text(position = position_dodge(0.7), vjust = -0.3, size = 3.2) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+    labs(x = property_label, y = "-log10(FDR)", title = paste("ORA per", property_label)) +
+    coord_flip() +
+    theme_minimal()
+}
+```
+
+```{r}
+# We generate ORA barplots for each lipid property
+plot_ora(ora_class, "Lipid Class")
+plot_ora(ora_unsat, "Degree of Unsaturation")
+plot_ora(ora_length, "Chain Length")
+```
+
+We define LSEA function by property and contrast
+
+```{r}
+# We implement a function to perform LSEA
+# This uses a Kolmogorov–Smirnov test to assess enrichment of ranked lipids
+
+run_lsea_by_contrast <- function(background, property, min_size = 3) {
+  map_dfr(unique(background$Contrast), function(ct) {
+    df_ct <- background %>% filter(Contrast == ct)
+    df_ct <- df_ct %>% mutate(rank = rank(-abs(logFC), ties.method = "average"))
+
+    sets <- split(df_ct$Lipid, df_ct[[property]])
+    sets <- sets[lengths(sets) >= min_size] # We retain sets above the minimum size
+
+    all_ranks <- df_ct$rank
+    all_lipids <- df_ct$Lipid
+
+    map_dfr(names(sets), function(set_name) {
+      in_set_lipids <- sets[[set_name]]
+      in_set <- all_lipids %in% in_set_lipids
+      if (sum(in_set) == 0) return(NULL)
+
+      ks <- ks.test(all_ranks[in_set], all_ranks[!in_set], alternative = "greater")
+
+      tibble(
+        Contrast = ct,
+        Set = set_name,
+        p_value = ks$p.value,
+        n_lipids = sum(in_set),
+        mean_rank = mean(all_ranks[in_set])
+      )
+    }) %>%
+      mutate(FDR = p.adjust(p_value, method = "fdr")) 
+  })
+}
+```
+
+We proceed to execute LSEA by property:
+
+```{r}
+# We run LSEA on the same lipid properties used in ORA
+lsea_class <- run_lsea_by_contrast(background_all, "Class.x")
+lsea_unsat <- run_lsea_by_contrast(background_all, "total_cs")
+lsea_length <- run_lsea_by_contrast(background_all, "total_cl")
+```
+
+```{r}
+dir.create("LSEA_results", showWarnings = FALSE)
+```
+
+```{r}
+# We write LSEA results to CSV files for each property
+write.csv(lsea_class, "LSEA_results/LSEA_resultados_por_clase.csv", row.names = FALSE)
+write.csv(lsea_unsat, "LSEA_results/LSEA_resultados_por_insaturacion.csv", row.names = FALSE)
+write.csv(lsea_length, "LSEA_results/LSEA_resultados_por_longitud.csv", row.names = FALSE)
+```
+
+Let's visualize LSEA results by property:
+
+```{r}
+# We define a plotting function for LSEA barplots, highlighting significant sets
+plot_lsea <- function(lsea_df, property_label) {
+  lsea_df %>%
+    filter(FDR < 0.05) %>%
+    ggplot(aes(x = reorder(Set, -log10(FDR)), y = -log10(FDR), fill = Contrast, label = n_lipids)) +
+    geom_col(position = position_dodge(), width = 0.7) +
+    geom_text(position = position_dodge(0.7), vjust = -0.3, size = 3.2) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+    scale_fill_brewer(palette = "Set1") +
+    labs(x = property_label, y = "-log10(FDR)", title = paste("LSEA per", property_label)) +
+    coord_flip() +
+    theme_minimal()
+}
+```
+
+```{r}
+# We export LSEA plots for each lipid property
+plot_lsea(lsea_class, "Lipid Class")
+plot_lsea(lsea_unsat, "Degree of Unsaturation")
+plot_lsea(lsea_length, "Chain length")
+```
+
+
+## Interpretation of Non-Significant but suggestive results 
+
+Although no sets passed the FDR correction threshold, several showed raw p-values < 0.05. These may indicate biologically relevant trends worthy of further investigation with higher statistical power
+
+-   ORA by class:
+    -   WT_vs_ntrc --\> PC and PG
+    -   WT_vs_OE --\> PG
+-   LSEA by chain length:
+    -   WT_vs_OE --\> 36
+    -   ntrc_vs_OE --\> 36
+-   LSEA by chain length:
+    -   WT_vs_OE --\> 6
+-   LSEA by class:
+    -   WT_vs_ntrc --\> PC and PA
+    -   WT_vs_OE --\> PG, MGDG and DGDG
+    -   ntrc_vs_OE --\> PA
+
+
+## ORA – Functional Pathway Enrichment
+
+```{r}
+# We load the list of significantly altered lipids and the total background lipid-pathway associations
+dems <- read_excel("ORA_functional/Biocyc_all_pathways_sig_lipids.xlsx")
+background <- read_excel("ORA_functional/Biocyc_all_pathways_total.xlsx")
+
+# We remove redundant compound-pathway combinations to avoid duplicated entries in the analysis
+dems_clean <- dems %>% distinct(Compound, Pathway)
+background_clean <- background %>% distinct(Compound, Pathway)
+```
+
+```{r}
+# We count the number of distinct lipids mapped to each pathway in the significant set (DEMs)
+dem_counts <- dems_clean %>%
+  group_by(Pathway) %>%
+  summarise(DEMs_in_pathway = n())
+
+# We count the number of distinct lipids mapped to each pathway in the background set
+bg_counts <- background_clean %>%
+  group_by(Pathway) %>%
+  summarise(BG_in_pathway = n())
+```
+
+```{r}
+## Contingency Table Construction
+
+# We compute the total number of unique significant and background lipids
+total_DEMs <- length(unique(dems_clean$Compound))
+total_BG <- length(unique(background_clean$Compound))
+
+# We construct a table with counts of lipids in and outside each pathway for both DEMs and background
+enrichment_table <- full_join(dem_counts, bg_counts, by = "Pathway") %>%
+  mutate(DEMs_in_pathway = replace_na(DEMs_in_pathway, 0),
+    BG_in_pathway = replace_na(BG_in_pathway, 0),
+    DEMs_not_in_pathway = total_DEMs - DEMs_in_pathway,
+    BG_not_in_pathway = total_BG - BG_in_pathway)
+```
+
+```{r}
+# We apply Fisher's exact test to each pathway to assess enrichment of significant lipids
+enrichment_results <- enrichment_table %>%
+  rowwise() %>%
+  mutate(
+    p_value = fisher.test(matrix(c(DEMs_in_pathway, DEMs_not_in_pathway,
+                                   BG_in_pathway, BG_not_in_pathway), nrow = 2))$p.value
+  ) %>%
+  ungroup() %>%
+  arrange(p_value) %>%
+  mutate(adj_p = p.adjust(p_value, method = "BH")) # We apply Benjamini–Hochberg correction for multiple testing
+```
+
+```{r}
+# We generate a bar plot showing the top 10 enriched pathways by −log10(p-value)
+
+ggplot(enrichment_results[1:10, ], aes(x = reorder(Pathway, -p_value), y = -log10(p_value))) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  labs(x = "Pathway", y = "-log10(p)", title = "Lipid Pathway Enrichment (Fisher's Exact Test)") +
+  theme_minimal() +
+  coord_flip()
+```
+
+
+## LSEA – Functional Pathway Enrichment
+
+```{r}
+# We load fold-change data for all lipids and convert it into a named numeric vector for fgsea
+lipid_fc <- as.data.frame(read_excel("ORA_functional/lipidos_totales_ntrc_vs_wt.xlsx"))
+stats_vector <- as.numeric(lipid_fc[[2]])
+names(stats_vector) <- lipid_fc$Lipid
+
+# We sort the statistics in decreasing order, as required by fgsea
+stats_vector <- sort(stats_vector, decreasing = TRUE)
+```
+
+```{r}
+# We create a named list of lipid sets, each representing a pathway
+background_unique <- background %>% distinct(Compound, Pathway)
+
+pathway_sets <- split(background_unique$Compound, background_unique$Pathway)
+```
+
+```{r}
+# We run the fgsea algorithm on our ranked lipid statistics
+fgsea_res <- fgsea(pathways = pathway_sets, stats = stats_vector)
+
+# We retain only significantly enriched pathways after multiple testing correction
+significant_pathways <- fgsea_res[fgsea_res$padj < 0.05, ]
+```
+
+```{r}
+# We format the leading edge compounds as comma-separated strings for easier readability
+significant_pathways$leadingEdge <- sapply(significant_pathways$leadingEdge, function(x) paste(x, collapse = ", "))
+
+# We export the filtered fgsea results to an Excel file
+write_xlsx(significant_pathways, path = "ORA_functional/pathways_fgsea_anotados.xlsx")
+```
+
+```{r}
+# We create a horizontal column plot showing Normalized Enrichment Scores (NES) for significant pathways
+
+ggplot(significant_pathways, aes(x = reorder(pathway, NES), y = NES, fill = padj)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_viridis_c(option = "C", direction = -1) +
+  theme_minimal() +
+  labs(x = NULL, y = "Normalized Enrichment Score", fill = "adj. p-value")
+```
+
+```{r}
+# We generate a dot plot showing enrichment scores and set sizes
+
+ggplot(significant_pathways, aes(x = NES, y = reorder(pathway, NES))) +
+  geom_point(aes(size = size, color = padj)) +
+  scale_color_gradient(low = "red", high = "blue", trans = "log10", guide = "colorbar") +
+  scale_size_continuous(range = c(3, 10)) +
+  theme_minimal() +
+  labs(x = "Normalized Enrichment Score", y = NULL, size = "Set size", color = "adj. p-value")
+```
+
+```{r}
+# We display the running enrichment score for the "phospholipases" pathway
+plotEnrichment(pathway_sets[["phospholipases"]], stats_vector) +
+  labs(title = "Enrichment for phospholipases pathway")
+```
+
+## Network Analysis of Significant Pathways
+
+```{r}
+# We extract pathway sets corresponding to significantly enriched terms
+pathways_sig <- pathway_sets[names(pathway_sets) %in% significant_pathways$pathway]
+
+# We calculate pairwise Jaccard similarity between all significant pathway sets
+edges <- combn(names(pathways_sig), 2, simplify = FALSE)
+edges_jaccard <- lapply(edges, function(pair) {
+  a <- pathways_sig[[pair[1]]]
+  b <- pathways_sig[[pair[2]]]
+  intersect_len <- length(intersect(a, b))
+  union_len <- length(union(a, b))
+  sim <- if (union_len == 0) 0 else intersect_len / union_len
+  data.frame(from = pair[1], to = pair[2], weight = sim)
+})
+
+edges_df <- do.call(rbind, edges_jaccard)
+# We remove edges representing weak similarity (Jaccard index ≤ 0.2)
+edges_df <- subset(edges_df, weight > 0.2)
+```
+
+```{r}
+# We construct and visualize a network graph from Jaccard-weighted edges
+g <- graph_from_data_frame(edges_df, directed = FALSE)
+plot(g, vertex.label.cex = 0.8,
+  edge.width = E(g)$weight * 5,
+  layout = layout_with_fr,
+  vertex.color = "skyblue",
+  vertex.label.color = "black")
+```
+
+```{r}
+# We compute node degree and flag hub nodes based on the 95th percentile
+g_tbl <- as_tbl_graph(g) %>%
+  mutate(degree = degree(g), is_hub = degree > quantile(degree(g), 0.95))
+
+# We visualize the network with hub nodes highlighted in red
+ggraph(g_tbl, layout = "fr") +
+  geom_edge_link(alpha = 0.4) +
+  geom_node_point(aes(color = is_hub, size = degree)) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "red")) +
+  theme_void()
+```
+
+
+# Exporting Significant Lipid Concentrations
+
+```{r}
+# We extract rows from the SummarizedExperiment object that correspond to significant lipids
+d_sig <- d[rownames(d) %in% lipidos_unicos, ]
+
+# We inspect the matrix of lipid concentrations (nmol/mg DW) for selected lipids
+assay(d_sig, "nmol_mg_DW")  
+```
+
+```{r}
+# We convert the matrix to a tidy data frame with lipid names as an explicit column
+conc_sig_df <- as.data.frame(assay(d_sig, "nmol_mg_DW")) %>%
+  rownames_to_column("Lipid")
+```
+
+```{r}
+# We export the filtered lipid concentration data to CSV for sharing
+write.csv(conc_sig_df, file = "lipidos_significativos_concentraciones.csv", row.names = FALSE)
+```
