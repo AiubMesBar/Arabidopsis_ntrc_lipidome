@@ -209,7 +209,9 @@ res.pca = PCA(pca.gene.expression, graph = FALSE, scale.unit = TRUE, quali.sup =
 # We generate a PCA plot with confidence ellipses by group.
 fviz_pca_ind(res.pca, col.ind = coldata$condition, pointsize = 2, pointshape = 21,
              fill = "black", repel = TRUE, addEllipses = TRUE, ellipse.type = "confidence",
-             legend.title = "Conditions", title = '', show_legend = TRUE, show_guide = TRUE)
+             legend.title = "Conditions", title = '', show_legend = TRUE, show_guide = TRUE) +
+             labs(x = paste0("PC1 (", round(res.pca$eig[1,2], 1), "%)"),
+             y = paste0("PC2 (", round(res.pca$eig[2,2], 1), "%)"))
 ```
 
 ## Clustering strategies
