@@ -357,7 +357,7 @@ plot_volcano <- function(de_results, contrast) {
     labs(title = paste("Volcano Plot:", contrast),
       x = "log2(Fold-change)",
       y = "-log10(Adj p-val)",
-      color = "Clase Lipídica") +
+      color = "Lipid Class") +
     theme_bw() +
     theme(legend.position = "right")
 }
