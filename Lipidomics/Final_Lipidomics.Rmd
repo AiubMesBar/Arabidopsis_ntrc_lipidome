@@ -252,17 +252,19 @@ my_colors <- colorRampPalette(rev(brewer.pal(9, "RdYlGn")))(100)
 
 ```{r}
 # We generate a heatmap of lipid profiles clustered by rows and columns
+png("heatmap_lipids.png", width = 900, height = 1400, res = 180) 
 pheatmap(mat,
          cluster_rows = TRUE,
          cluster_cols = TRUE,
-         scale = "row",  # escalado por filas para ver patrones relativos
+         scale = "row",
          clustering_distance_rows = "correlation",
          clustering_method = "complete",
          annotation_col = annotation_col,
          main = "Heatmap of Lipid Profiles",
          fontsize_col = 12,
-         fontsize_row = 6,
+         fontsize_row = 4,
          color = my_colors)
+dev.off()
 ```
 
 # Differential abundance analysis
