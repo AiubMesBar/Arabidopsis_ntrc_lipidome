@@ -98,7 +98,7 @@ colnames(lipase_expr) <- colnames(n_gene_express)
 pheatmap(as.matrix(lipase_expr), cluster_rows = T, cluster_cols = T,
          scale = "row", clustering_distance_rows = "correlation", 
          clustering_method = "complete", #annotation_col = coldata, 
-         main="Lipase",fontsize_col=14, fontsize_row = 4, color = greenred(28))
+         main="Lipases",fontsize_col=14, fontsize_row = 4, color = greenred(28))
 ```
 
 
