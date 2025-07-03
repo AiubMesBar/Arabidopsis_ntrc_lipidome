@@ -409,7 +409,7 @@ genes_adult <- rbind(
   cbind(downregulated_genes, Regulation = "Downregulated")) %>%
   dplyr::arrange(desc(logFC)) 
 
-de_genes_adult_export <- cbind(GeneID = rownames(de_genes_adult), de_genes_adult)
+de_genes_adult_export <- cbind(GeneID = rownames(genes_adult), genes_adult)
 
 write_xlsx(de_genes_adult_export, path = "degs_adult_ntrc_vs_wt.xlsx") 
 ```
@@ -417,7 +417,7 @@ write_xlsx(de_genes_adult_export, path = "degs_adult_ntrc_vs_wt.xlsx")
 ## Heatmap for TOP 10 DEGS
 
 ```{r}
-top10 <- head(de_genes_adult[order(-abs(de_genes_adult$logFC)), ], 10)
+top10 <- head(genes_adult[order(-abs(genes_adult$logFC)), ], 10)
 top10_ids <- rownames(top10)
 
 selected.table <- norm_expr$E[top10_ids, ]
@@ -425,8 +425,8 @@ head(selected.table)
 
 pheatmap(as.matrix(selected.table), cluster_rows = T, cluster_cols = T,
          scale = "row", clustering_distance_rows = "correlation", 
-         clustering_method = "complete", #annotation_col = coldata, 
-         main="DEGs",fontsize_col=14, fontsize_row = 4, color = greenred(28))
+         clustering_method = "complete", main="DEGs",fontsize_col=14, fontsize_row = 10, 
+         color = greenred(28))
 ```
 
 # Gene Ontology (GO) Enrichment Analysis (Adult group)
@@ -529,7 +529,7 @@ limma.repressed.enrich.go_adult <- enrichGO(gene = limma.repressed.genes.wb_adul
 goplot(limma.repressed.enrich.go_adult,showCategory = 30)
 barplot(limma.repressed.enrich.go_adult,drop=TRUE,showCategory = 10)
 cnetplot(limma.repressed.enrich.go_adult)
-dotplot(limma.repressed.enrich.go_adult, showCategory =20)
+dotplot(limma.repressed.enrich.go_adult, showCategory =15)
 ```
 
 ```{r}
